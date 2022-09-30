@@ -5,7 +5,7 @@ import subprocess
 import sys
 
 print("-----------------VerifyVideo-----------------")
-print("Tool to check for corrupted videos")
+print("Script to check for corrupted videos")
 print("by Kidsnd274")
 print("")
 
