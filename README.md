@@ -12,5 +12,5 @@ eg. `python VerifyVideo.py -f "Folder Location"`
 Corrupted videos will be listed in a corrupted_files.txt file created in the same directory as the VerifyVideo.py script.\
 The logs will be displayed in the terminal as well.
 
-You can change which file extensions are considered video files in line 19 of the script
+You can change which file extensions are considered video files in line 19 of the script\
 `video_file_extensions = ['.mkv', '.mp4', '.avi', '.webm']`
