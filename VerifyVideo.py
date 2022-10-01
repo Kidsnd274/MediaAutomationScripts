@@ -1,20 +1,38 @@
+import argparse
 import json
 import math
 import pathlib
 import subprocess
 import sys
 
+# Command Line Arguments
+parser = argparse.ArgumentParser(description="Script to check for corrupted videos")
+parser.add_argument('-f', '--folder', type=str, metavar='', required=False, help="Folder containing the videos")
+args = parser.parse_args()
+
+
 print("-----------------VerifyVideo-----------------")
 print("Script to check for corrupted videos")
 print("by Kidsnd274")
 print("")
 
-video_file_extensions = ['.mkv', '.mp4', '.avi', '.webm']
+video_file_extensions = ['.mkv', '.mp4', '.avi', '.webm'] # Edit this to include whatever extensions you want
 
 current_directory = pathlib.Path(__file__).parent.absolute()
-video_files = [x for x in current_directory.iterdir() if (x.is_file() and x.suffix in video_file_extensions)]
 
-# Check if ffmpeg in current directory
+if args.folder is None:
+    video_directory = current_directory
+else:
+    video_directory = pathlib.Path(args.folder).absolute()
+
+print("Folder:", video_directory.resolve())
+
+video_files = [x for x in video_directory.iterdir() if (x.is_file() and x.suffix in video_file_extensions)]
+if (not video_files):
+    print("No video files found")
+    exit()
+
+# Setting ffmpeg and ffprobe locations
 locations_ffmpeg = [current_directory / "ffmpeg.exe",
              current_directory / "ffmpeg"]
 
@@ -45,6 +63,7 @@ if not ffprobe_found:
     else:
         ffprobe_exec = "ffprobe"
 
+
 def convert_to_float(frac_str):
     try:
         return float(frac_str)
@@ -58,11 +77,12 @@ def convert_to_float(frac_str):
         frac = float(num) / float(denom)
         return whole - frac if whole < 0 else whole + frac
 
+
 def ffmpeg_check(file):
     print("Running ffmpeg check...", end="")
     args = [ffmpeg_exec, 
             "-v", "error", 
-            "-i", file.name,
+            "-i", file.resolve(),
             "-f", "null",
             "-"
             ]
@@ -89,7 +109,7 @@ def ffprobe_check(file):
         "-threads", "8", # might not want to include this
         "-v", "quiet",
         "-print_format", "json",
-        file.name]
+        file.resolve()]
     process = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
     # print(process.stdout)
     
@@ -119,6 +139,8 @@ def ffprobe_check(file):
     print("  OK!")
     return True
     
+
+# Running loop to check
 corrupted_files = []
 for video in video_files:
     print("Checking: " + video.name)
@@ -137,15 +159,3 @@ if corrupted_files:
         for file in corrupted_files:
             f.write(file.name)
             f.write("\n")
-            
-            
-            
-# args = [ffprobe_exec,
-#         "-show_entries", "stream=r_frame_rate,nb_read_frames,duration",
-#         "-select_streams", "v",
-#         "-count_frames",
-#         "-of", "compact=p=1:nk=1",
-#         "-threads", "8",
-#         "-v", "quiet",
-#         "-print_format", "json",
-#         file.name]
