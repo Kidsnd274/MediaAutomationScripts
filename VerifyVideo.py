@@ -159,3 +159,4 @@ if corrupted_files:
         for file in corrupted_files:
             f.write(file.name)
             f.write("\n")
+    exit(1) # Exit with code 1 if corrupted videos found
