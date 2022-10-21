@@ -1,7 +1,10 @@
-# VerifyVideo
+# Media Automation Scripts
+Just a collection of some scripts that I use to automate my management of media
+
+## VerifyVideo
 Script to check for corrupted videos
 
-## Usage
+### Usage
 You need **ffmpeg** and **ffprobe** to be in either PATH or in the same directory as the VerifyVideo.py script.\
 Run the command `python VerifyVideo.py` to start verifying videos
 
@@ -14,3 +17,9 @@ The logs will be displayed in the terminal as well.
 
 You can change which file extensions are considered video files in **line 19** of the script\
 `video_file_extensions = ['.mkv', '.mp4', '.avi', '.webm']`
+
+## VMAFBatch
+Script to run VMAF easily and on multiple files
+
+### Usage
+You need **ffmpeg** to be in either PATH or in the same directory as the script. ffmpeg needs to be build with **--enable-libvmaf**.
