@@ -18,8 +18,16 @@ The logs will be displayed in the terminal as well.
 You can change which file extensions are considered video files in **line 19** of the script\
 `video_file_extensions = ['.mkv', '.mp4', '.avi', '.webm']`
 
-## VMAFBatch
+## VmafBatch
 Script to run VMAF easily and on multiple files
 
 ### Usage
 You need **ffmpeg** to be in either PATH or in the same directory as the script. ffmpeg needs to be build with **--enable-libvmaf**.
+
+Open the script and edit the pair of videos to run VMAF analysis on.
+Run the command `python VmafBatch.py` to start.
+
+## mkvmerge_batch
+Script to run the same mkvmerge command on files that have similar names but their episode number is different.
+
+Edit the .bat according to the instructions
