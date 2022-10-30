@@ -45,7 +45,10 @@ def run_vmaf(video): # ffmpeg -i "distorted.mkv" -i "reference.mkv" -lavfi libvm
     args = [ffmpeg_exec, 
             "-i", video.distorted.resolve(), 
             "-i", video.reference.resolve(),
-            "-lavfi", "libvmaf='n_threads=" + str(n_threads) + ":n_subsample=" + str(n_subsample) + ":log_path=" + log_f.name + ":log_fmt=json",
+            "-lavfi", "libvmaf='n_threads=" + str(n_threads) + ":n_subsample=" + str(n_subsample) +
+            ":psnr=1" + # Comment this out to disable PSNR
+            ":ssim=1" + # Comment this out to disable SSIM
+            ":log_path=" + log_f.name + ":log_fmt=json",
             "-hide_banner",
             "-v", "quiet",
             "-stats",
