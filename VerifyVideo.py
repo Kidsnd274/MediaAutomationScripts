@@ -34,9 +34,11 @@ if (not video_files):
 
 # Setting ffmpeg and ffprobe locations
 locations_ffmpeg = [current_directory / "ffmpeg.exe",
-             current_directory / "ffmpeg"]
+                    current_directory / "ffmpeg" / "ffmpeg.exe",
+                    current_directory / "ffmpeg"]
 
 locations_ffprobe = [current_directory / "ffprobe.exe",
+                     current_directory / "ffmpeg" / "ffprobe.exe",
                      current_directory / "ffprobe"]
 
 ffmpeg_found = False
