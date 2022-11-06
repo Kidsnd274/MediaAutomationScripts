@@ -32,6 +32,11 @@ video_files = [x for x in video_directory.iterdir() if (x.is_file() and x.suffix
 if (not video_files):
     print("No video files found")
     exit()
+    
+print("Videos detected:")
+for video in video_files:
+    print(video.name)
+print("")
 
 # Setting ffmpeg and ffprobe locations
 locations_ffmpeg = [current_directory / "ffmpeg.exe",
