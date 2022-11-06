@@ -54,7 +54,7 @@ if not ffmpeg_found:
         ffmpeg_exec = "ffmpeg"
         
 ffprobe_found = False
-for location in locations_ffmpeg:
+for location in locations_ffprobe:
     if location.exists():
         ffprobe_exec = location.resolve()
         found = True
