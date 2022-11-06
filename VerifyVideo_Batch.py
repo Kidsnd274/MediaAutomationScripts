@@ -1,15 +1,17 @@
 import argparse
+import datetime
 import json
 import math
 import pathlib
 import subprocess
 import sys
+import time
 
 # Automated Batch Version that runs on files that ends with "_new" eg. file_new.mkv (for Staxrip)
 
 # Command Line Arguments
 parser = argparse.ArgumentParser(description="Script to check for corrupted videos")
-parser.add_argument('-f', '--folder', type=str, metavar='', required=False, help="Folder containing the videos")
+parser.add_argument('folder', type=str, metavar='', help="Folder containing the videos")
 args = parser.parse_args()
 
 
@@ -170,7 +172,7 @@ def ffprobe_check(file):
         print("  OK!")
     
     # File duration check
-    if (round(duration_from_frames) != round(file_duration)):
+    if (math.floor(duration_from_frames) != math.floor(file_duration)):
         print("WARN: File duration and Frame duration mismatch")
         print("  File Duration:", file_duration)
         print("  Calculated duration (from frames):", duration_from_frames)

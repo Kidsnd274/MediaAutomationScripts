@@ -1,9 +1,10 @@
 import argparse
+import datetime
 import json
-import math
 import pathlib
 import subprocess
 import sys
+import time
 
 # Command Line Arguments
 parser = argparse.ArgumentParser(description="Script to check for corrupted videos")
@@ -80,6 +81,14 @@ def convert_to_float(frac_str):
         return whole - frac if whole < 0 else whole + frac
 
 
+def calculate_audio_duration(extracted_audio_duration_string):
+    splitted = extracted_audio_duration_string.split('.')
+    extract_audio_dur = time.strptime(splitted[0], '%H:%M:%S')
+    audio_duration = datetime.timedelta(hours=extract_audio_dur.tm_hour,minutes=extract_audio_dur.tm_min,seconds=extract_audio_dur.tm_sec).total_seconds()
+    audio_duration += float("0." + str(splitted[1]))
+    return audio_duration
+
+
 def ffmpeg_check(file):
     print("Running ffmpeg check...", end="")
     args = [ffmpeg_exec, 
@@ -105,7 +114,7 @@ def ffprobe_check(file):
 
     args = [ffprobe_exec,
         "-show_format",
-        "-select_streams", "v",
+        # "-select_streams", "v",
         "-show_streams",
         "-count_frames",
         "-threads", "8", # might not want to include this
@@ -123,23 +132,36 @@ def ffprobe_check(file):
         return False
     
     d = json.loads(process.stdout)
-    duration = float(d["format"]["duration"])
+    file_duration = float(d["format"]["duration"])
     frames = int(d["streams"][0]["nb_read_frames"])
     framerate = convert_to_float(d["streams"][0]["r_frame_rate"])
     
+    audio_duration = calculate_audio_duration(d["streams"][1]["tags"]["DURATION"])
     duration_from_frames = frames/framerate
     
-    if (math.floor(duration_from_frames) != math.floor(duration)):
+    file_ok = True
+    
+    # Audio duration check
+    if (round(audio_duration) != round(duration_from_frames)):
         print(" ERROR")
         print("  Frame count:", frames)
         print("  Framerate:", framerate)
-        print("  Duration:", duration)
-        print("  Calculated duration:", duration_from_frames)
+        print("  File Duration:", file_duration)
+        print("  Audio Duration:", audio_duration)
+        print("  Frame Duration:", duration_from_frames)
         print("Duration mismatch detected, video corrupt!")
-        return False
+        file_ok = False
+
+    if file_ok:
+        print("  OK!")
     
-    print("  OK!")
-    return True
+    # File duration check
+    if (round(duration_from_frames) != round(file_duration)):
+        print("WARN: File duration and Frame duration mismatch")
+        print("  File Duration:", file_duration)
+        print("  Calculated duration (from frames):", duration_from_frames)
+        
+    return file_ok
     
 
 # Running loop to check
@@ -157,6 +179,10 @@ for video in video_files:
     print("")
 
 if corrupted_files:
+    print("Corrupted Files:")
+    for file in corrupted_files:
+        print(file.name)
+    
     with open("corrupted_files.txt", "w") as f:
         for file in corrupted_files:
             f.write(file.name)

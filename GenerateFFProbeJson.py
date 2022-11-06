@@ -1,14 +1,10 @@
 import argparse
+import datetime
 import json
-import math
 import pathlib
 import subprocess
 import sys
-
-import datetime
 import time
-
-# AUTOMATED BATCH VERSION FOR SPECIFIC USECASE
 
 # Command Line Arguments
 parser = argparse.ArgumentParser(description="Script to check for corrupted videos")
