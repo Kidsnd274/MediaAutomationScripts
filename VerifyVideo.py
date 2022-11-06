@@ -161,7 +161,7 @@ def ffprobe_check(file):
         print("  OK!")
     
     # File duration check
-    if (round(duration_from_frames) != round(file_duration)):
+    if (math.floor(duration_from_frames) != math.floor(file_duration)):
         print("WARN: File duration and Frame duration mismatch")
         print("  File Duration:", file_duration)
         print("  Frames Duration:", duration_from_frames)
