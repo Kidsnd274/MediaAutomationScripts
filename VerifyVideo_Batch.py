@@ -164,7 +164,7 @@ def ffprobe_check(file):
         print("  Framerate:", framerate)
         print("  File Duration:", file_duration)
         print("  Audio Duration:", audio_duration)
-        print("  Frame Duration:", duration_from_frames)
+        print("  Frames Duration:", duration_from_frames)
         print("Duration mismatch detected, video corrupt!")
         file_ok = False
 
@@ -175,7 +175,7 @@ def ffprobe_check(file):
     if (math.floor(duration_from_frames) != math.floor(file_duration)):
         print("WARN: File duration and Frame duration mismatch")
         print("  File Duration:", file_duration)
-        print("  Calculated duration (from frames):", duration_from_frames)
+        print("  Frames Duration:", duration_from_frames)
         
     return file_ok
     
