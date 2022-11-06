@@ -51,7 +51,7 @@ ffmpeg_found = False
 for location in locations_ffmpeg:
     if location.exists():
         ffmpeg_exec = location.resolve()
-        found = True
+        ffmpeg_found = True
         break
 if not ffmpeg_found:
     if sys.platform == 'win32':
@@ -63,7 +63,7 @@ ffprobe_found = False
 for location in locations_ffprobe:
     if location.exists():
         ffprobe_exec = location.resolve()
-        found = True
+        ffprobe_found = True
         break
 if not ffprobe_found:
     if sys.platform == 'win32':
@@ -193,3 +193,5 @@ if corrupted_files:
             f.write(file.name)
             f.write("\n")
     exit(1) # Exit with code 1 if corrupted videos found
+
+print("All files checked!")
