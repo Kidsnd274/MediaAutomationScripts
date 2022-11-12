@@ -180,7 +180,7 @@ def ffprobe_check(file): # ffprobe -show_streams -show_format -threads 8 -v quie
         file_ok = False
 
     if file_ok:
-        print("File OK!")
+        print("ffprobe OK!")
     
     # File duration check
     if (math.floor(duration_from_frames) != math.floor(file_duration)):
