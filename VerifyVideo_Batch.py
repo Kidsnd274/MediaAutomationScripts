@@ -160,7 +160,7 @@ def ffprobe_check(file): # ffprobe -show_streams -show_format -threads 8 -v quie
             audio_duration = calculate_audio_duration(d["streams"][1]["tags"]["DURATION-eng"])
         except KeyError: # mp4 files including shadowplay and ffmpeg mp4 output
             try:
-                audio_duration = d["streams"][1]["duration"]
+                audio_duration = float(d["streams"][1]["duration"])
             except KeyError:
                 print("Skipping audio duration check...")
                 audio_duration = duration_from_frames
