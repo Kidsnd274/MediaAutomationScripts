@@ -37,7 +37,7 @@ for i in video_directory.glob('**/*'):
     cond1 = i.is_file()
     cond2 = i.suffix in video_file_extensions
     cond3 = i.stem.endswith("_new")
-    if (cond1 and cond2 and cond3):
+    if (cond1 and cond2 and cond3): # Remove cond3 to remove "_new" check
         video_files.append(i)
 
 if (not video_files):
@@ -125,8 +125,8 @@ def ffmpeg_check(file):
     return True
 
 
-def ffprobe_check(file):
-    print("Running ffprobe check...", end="")
+def ffprobe_check(file): # ffprobe -show_streams -show_format -threads 8 -v quiet -print_format json (test command to print json)
+    print("Running ffprobe check...")
 
     args = [ffprobe_exec,
         "-show_format",
@@ -152,14 +152,25 @@ def ffprobe_check(file):
     frames = int(d["streams"][0]["nb_read_frames"])
     framerate = convert_to_float(d["streams"][0]["r_frame_rate"])
     
-    audio_duration = calculate_audio_duration(d["streams"][1]["tags"]["DURATION"])
     duration_from_frames = frames/framerate
+    try:
+        audio_duration = calculate_audio_duration(d["streams"][1]["tags"]["DURATION"])
+    except KeyError: # MKV files with DURATION-eng
+        try:
+            audio_duration = calculate_audio_duration(d["streams"][1]["tags"]["DURATION-eng"])
+        except KeyError: # mp4 files including shadowplay and ffmpeg mp4 output
+            try:
+                audio_duration = d["streams"][1]["duration"]
+            except KeyError:
+                print("Skipping audio duration check...")
+                audio_duration = duration_from_frames
+
     
     file_ok = True
     
     # Audio duration check
     if (round(audio_duration) != round(duration_from_frames)):
-        print(" ERROR")
+        print("ERROR")
         print("  Frame count:", frames)
         print("  Framerate:", framerate)
         print("  File Duration:", file_duration)
@@ -169,7 +180,7 @@ def ffprobe_check(file):
         file_ok = False
 
     if file_ok:
-        print("  OK!")
+        print("File OK!")
     
     # File duration check
     if (math.floor(duration_from_frames) != math.floor(file_duration)):
