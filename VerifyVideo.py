@@ -12,6 +12,7 @@ parser = argparse.ArgumentParser(description="Script to check for corrupted vide
 parser.add_argument('-f', '--folder', type=str, metavar='', required=False, help="Folder containing the videos")
 parser.add_argument('-r', '--recursive', action='store_true', required=False, help="Recursively check folders and sub-folders")
 parser.add_argument('-s', '--staxrip', action='store_true', required=False, help="Only includes videos with filename suffix '_new'")
+parser.add_argument('-if', '--ignore-ffmpeg', dest='ignore_ffmpeg', action='store_true', required=False, help="Ignore ffmpeg check and only run ffprobe check")
 args = parser.parse_args()
 
 
@@ -38,6 +39,11 @@ if args.recursive:
     recursive_bool = True
 else:
     recursive_bool = False
+    
+if args.ignore_ffmpeg:
+    ignore_ffmpeg = True
+else:
+    ignore_ffmpeg = False
 
 print("Folder:", video_directory.resolve())
 
@@ -213,7 +219,7 @@ def ffprobe_check(file): # ffprobe -show_streams -show_format -threads 8 -v quie
 corrupted_files = []
 for video in video_files:
     print("Checking: " + video.name)
-    pass1 = ffmpeg_check(video)
+    pass1 = ignore_ffmpeg or ffmpeg_check(video)
     pass2 = ffprobe_check(video)
     
     if (pass1 and pass2):
