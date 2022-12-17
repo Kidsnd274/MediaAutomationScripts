@@ -9,7 +9,7 @@ import time
 
 # Command Line Arguments
 parser = argparse.ArgumentParser(description="Script to check for corrupted videos")
-parser.add_argument('-f', '--folder', type=str, metavar='', required=False, help="Folder containing the videos")
+parser.add_argument('-f', '--folder', type=str, metavar='', required=False, nargs='*', default=[], help="Folders containing the videos")
 parser.add_argument('-r', '--recursive', action='store_true', required=False, help="Recursively check folders and sub-folders")
 parser.add_argument('-s', '--staxrip', action='store_true', required=False, help="Only includes videos with filename suffix '_new'")
 parser.add_argument('-if', '--ignore-ffmpeg', dest='ignore_ffmpeg', action='store_true', required=False, help="Ignore ffmpeg check and only run ffprobe check")
@@ -25,10 +25,13 @@ video_file_extensions = ['.mkv', '.mp4', '.avi', '.webm'] # Edit this to include
 
 current_directory = pathlib.Path(__file__).parent.absolute()
 
-if args.folder is None:
-    video_directory = current_directory
+directories = []
+
+if not args.folder:
+    directories.append(current_directory)
 else:
-    video_directory = pathlib.Path(args.folder).absolute()
+    for dir in args.folder:
+        directories.append(pathlib.Path(dir).absolute())
     
 if args.staxrip:
     staxrip_bool = True
@@ -45,24 +48,28 @@ if args.ignore_ffmpeg:
 else:
     ignore_ffmpeg = False
 
-print("Folder:", video_directory.resolve())
+print("Folders:", [str(dir) for dir in directories])
 
 video_files = []
 
-if recursive_bool:
-    for i in video_directory.glob('**/*'):
-        cond1 = i.is_file()
-        cond2 = i.suffix in video_file_extensions
-        cond3 = i.stem.endswith("_new") or (not staxrip_bool) # Check Truth Table
-        if (cond1 and cond2 and cond3): # Remove cond3 to remove "_new" check
-            video_files.append(i)
-else: # Check only current folder
-    for i in video_directory.iterdir():
-        cond1 = i.is_file()
-        cond2 = i.suffix in video_file_extensions
-        cond3 = i.stem.endswith("_new") or (not staxrip_bool) # Check Truth Table
-        if (cond1 and cond2 and cond3):
-            video_files.append(i)
+def scan_folder(video_directory):
+    if recursive_bool:
+        for i in video_directory.glob('**/*'):
+            cond1 = i.is_file()
+            cond2 = i.suffix in video_file_extensions
+            cond3 = i.stem.endswith("_new") or (not staxrip_bool) # Check Truth Table
+            if (cond1 and cond2 and cond3): # Remove cond3 to remove "_new" check
+                video_files.append(i)
+    else: # Check only current folder
+        for i in video_directory.iterdir():
+            cond1 = i.is_file()
+            cond2 = i.suffix in video_file_extensions
+            cond3 = i.stem.endswith("_new") or (not staxrip_bool) # Check Truth Table
+            if (cond1 and cond2 and cond3):
+                video_files.append(i)
+
+for dir in directories:
+    scan_folder(dir)
 
 if (not video_files):
     print("No video files found")
