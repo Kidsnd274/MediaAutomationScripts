@@ -18,6 +18,16 @@ The logs will be displayed in the terminal as well.
 You can change which file extensions are considered video files in **line 19** of the script\
 `video_file_extensions = ['.mkv', '.mp4', '.avi', '.webm']`
 
+```
+options:
+  -h, --help            show this help message and exit
+  -f [ ...], --folder [ ...]
+                        Folders containing the videos
+  -r, --recursive       Recursively check folders and sub-folders
+  -s, --staxrip         Only includes videos with filename suffix '_new'
+  -if, --ignore-ffmpeg  Ignore ffmpeg check and only run ffprobe check
+```
+
 ## VmafBatch
 Script to run VMAF easily and on multiple files
 

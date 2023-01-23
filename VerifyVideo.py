@@ -19,6 +19,7 @@ args = parser.parse_args()
 print("-----------------VerifyVideo-----------------")
 print("Script to check for corrupted videos")
 print("by Kidsnd274")
+print("https://github.com/Kidsnd274/MediaAutomationScripts")
 print("")
 
 video_file_extensions = ['.mkv', '.mp4', '.avi', '.webm'] # Edit this to include whatever extensions you want
@@ -33,20 +34,26 @@ else:
     for dir in args.folder:
         directories.append(pathlib.Path(dir).absolute())
     
-if args.staxrip:
-    staxrip_bool = True
-else:
-    staxrip_bool = False
-    
 if args.recursive:
     recursive_bool = True
+    print("INFO: Recursively checking folders")
 else:
     recursive_bool = False
     
+if args.staxrip:
+    staxrip_bool = True
+    print("INFO: Only checking files with filename suffix \'_new\'")
+else:
+    staxrip_bool = False
+    
 if args.ignore_ffmpeg:
     ignore_ffmpeg = True
+    print("INFO: Ignoring ffmpeg check, but will still run ffprobe check")
 else:
     ignore_ffmpeg = False
+
+if staxrip_bool or recursive_bool or ignore_ffmpeg:
+    print("")
 
 print("Folders:", [str(dir) for dir in directories])
 
@@ -199,14 +206,21 @@ def ffprobe_check(file): # ffprobe -show_streams -show_format -threads 8 -v quie
     
     file_ok = True
     
-    # Audio duration check
-    if (round(audio_duration) != round(duration_from_frames)):
+    # Audio duration check (new method)
+    # This method compares the difference between the audio duration and video duration (using frames)
+    # If the difference exceeds the duration of one frame or 50ms (whichever is lower), then the video is corrupt
+    max_threshold = 50
+    one_frame_duration = (1/framerate) * 1000
+    threshold = min(max_threshold, one_frame_duration)
+    duration_difference = abs(duration_from_frames - audio_duration)
+    if (duration_difference > threshold):
         print("ERROR")
         print("  Frame count:", frames)
         print("  Framerate:", framerate)
         print("  File Duration:", file_duration)
         print("  Audio Duration:", audio_duration)
         print("  Frames Duration:", duration_from_frames)
+        print(f"  Difference: {str(duration_difference)} > {str(threshold)}")
         print("Duration mismatch detected, video corrupt!")
         file_ok = False
 
@@ -217,6 +231,14 @@ def ffprobe_check(file): # ffprobe -show_streams -show_format -threads 8 -v quie
     if (math.floor(duration_from_frames) != math.floor(file_duration)):
         print("WARN: File duration and Frame duration mismatch")
         print("  File Duration:", file_duration)
+        print("  Frames Duration:", duration_from_frames)
+        
+    # Audio duration check
+    if (round(audio_duration) != round(duration_from_frames)):
+        print("WARN: Failed old check method")
+        print("  Frame count:", frames)
+        print("  Framerate:", framerate)
+        print("  Audio Duration:", audio_duration)
         print("  Frames Duration:", duration_from_frames)
         
     return file_ok
