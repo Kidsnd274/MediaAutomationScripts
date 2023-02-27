@@ -12,7 +12,6 @@ parser = argparse.ArgumentParser(description="Script to run a mkvmerge command o
 parser.add_argument('-f', '--folder', type=str, metavar='', required=False, help="Folder containing the videos")
 parser.add_argument('-r', '--recursive', action='store_true', required=False, help="Recursively check folders and sub-folders")
 parser.add_argument('-s', '--staxrip', action='store_true', required=False, help="Only includes videos with filename suffix '_new'")
-parser.add_argument('-if', '--ignore-ffmpeg', dest='ignore_ffmpeg', action='store_true', required=False, help="Ignore ffmpeg check and only run ffprobe check")
 args = parser.parse_args()
 
 
@@ -39,11 +38,6 @@ if args.recursive:
     recursive_bool = True
 else:
     recursive_bool = False
-    
-if args.ignore_ffmpeg:
-    ignore_ffmpeg = True
-else:
-    ignore_ffmpeg = False
 
 print("Folder:", video_directory.resolve())
 
@@ -74,16 +68,15 @@ for video in video_files:
 print("")
 
 def run_command(file):
-    print("Running command on " + file.name)
-    command = f'"C:\Program Files\MKVToolNix\mkvmerge.exe" --ui-language en --output ^"{file.parent / file.stem}_final.mkv^" --subtitle-tracks 3 --language 0:und --display-dimensions 0:1920x1080 --chroma-siting 0:1,1 --color-range 0:1 --language 1:ja --track-name ^"1:Japanese 2.0 ^| Opus 160k^" --language 3:en --track-name 3:Dialogue ^"^(^" ^"{file.resolve}^" ^"^)^" --track-order 0:0,0:1,0:3'
-    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    process.communicate()
-    return True
+    command = f'"C:\Program Files\MKVToolNix\mkvmerge.exe" --ui-language en --output ^"{file.parent / file.stem}_final.mkv^" --subtitle-tracks 3 --language 0:und --display-dimensions 0:1920x1080 --chroma-siting 0:1,1 --color-range 0:1 --language 1:ja --track-name ^"1:Japanese 2.0 ^| Opus 160k^" --language 3:en --track-name 3:Dialogue --default-track-flag 3:yes ^"^(^" ^"{str(file.resolve())}^" ^"^)^" --track-order 0:0,0:1,0:3' # Command to remove 1st subtitle track
+    print("Command: " + command + "\n")
+    process = subprocess.run(command, shell=True)
+    print("")
+    if process.returncode != 0:
+        exit(1)
     
 
 # Running loop to check
 for video in video_files:
     print("Running command on: " + video.name)
-    if not run_command(video):
-        print("Command failed!")
-        exit(1)
+    run_command(video)
