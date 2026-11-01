@@ -80,6 +80,7 @@ for dir in directories:
 
 if (not video_files):
     print("No video files found")
+    input("Press Enter to exit...")
     exit()
     
 print("Videos detected:")
@@ -267,6 +268,8 @@ if corrupted_files:
         for file in corrupted_files:
             f.write(file.name)
             f.write("\n")
+    input("Press Enter to exit...")
     exit(1) # Exit with code 1 if corrupted videos found
 
 print("All files checked!")
+input("Press Enter to exit...")
