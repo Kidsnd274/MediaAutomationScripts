@@ -39,11 +39,15 @@ Missing paths, directories passed to `--file`, and unsupported extensions are re
 
 ### Status and progress
 
-The original Kidsnd274 banner is followed by the selected folders, enabled checks, timing policy, and a numbered list of all selected files. Each file has a `[current/total]` heading and named stages for FFprobe metadata, each video/audio stream scan, the independent FFmpeg decode, original comparison, and duration checks. Full commands and routine decoder logs are hidden.
+The Kidsnd274 banner is followed by the selected folders, enabled checks, timing policy, and a numbered list of all selected files (shown relative to their folder). Each file has a `[current/total]` heading and one aligned row per stage: FFprobe metadata, each video/audio stream scan, the independent FFmpeg decode, original comparison, and duration checks. Each row starts with a status icon (`✓` done, `▲` warning, `✗` error, `–` skipped) and shows frame counts, media duration, and elapsed time. Warnings and errors are then listed as a tree under the stages, followed by the file's verdict (`PASSED`, `PASSED WITH WARNINGS`, or `FAILED`). Full commands and routine decoder logs are hidden.
 
-In an interactive terminal, a single line updates about twice per second with estimated media-time percentage, processed time, frame count when available, and elapsed time. When duration is unavailable, processed time and frame count are shown without a percentage. Percentages describe the current stage, not the whole batch, and remain below 100% until the stage finishes. A completed stage shows `done`, `issues found`, or `failed`, with available frame counts and media duration.
+In an interactive terminal, a spinner line with a progress bar updates about four times per second with estimated media-time percentage, processed time, frame count when available, and elapsed time. When duration is unavailable, processed time and frame count are shown without a percentage. Percentages describe the current stage, not the whole batch, and remain below 100% until the stage finishes.
 
-Redirected output uses ordinary lines without terminal control sequences: stage starts/completions and, for long checks, an update at most once every 30 seconds. Each file ends with its result and error/warning counts; the final summary includes passed files, failures, files with warnings, elapsed time, and the failure-report location if one was written.
+The summary shows a results table (result, error and warning counts, time, and file), the passed / with-warnings / failed totals, total elapsed time, failed paths, and the failure-report location if one was written. "With warnings" counts files that passed with warnings.
+
+Colour is used only in an interactive terminal, using standard ANSI codes (enabled on Windows consoles through `ctypes`, with no extra packages); set `NO_COLOR` to turn it off. Redirected output has no colour or cursor control: stage starts/completions and, for long checks, an update at most once every 30 seconds. If the output encoding cannot represent the Unicode symbols (for example a `cp1252` log file on Windows), plain ASCII equivalents are used instead.
+
+To compare candidate output styles with mock data (no FFmpeg needed), run `python previews/style_preview.py`.
 
 ### What is checked
 

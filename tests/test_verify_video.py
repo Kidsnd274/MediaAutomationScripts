@@ -309,12 +309,14 @@ class LogicTests(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 code = vv.main(['-f', folder, '-s', '--strict-timing'])
         text = output.getvalue()
-        banner = ('-----------------VerifyVideo-----------------\n'
-                  'Script to check for corrupted videos\nby Kidsnd274\n'
-                  'https://github.com/Kidsnd274/MediaAutomationScripts\n\n')
-        self.assertTrue(text.startswith(banner))
-        self.assertLess(text.index('Videos detected: 1'), text.index('[1/1] Checking:'))
+        banner = text.split('\n\n')[0]
+        for line in ('VerifyVideo', 'Script to check for corrupted videos', 'by Kidsnd274',
+                     'https://github.com/Kidsnd274/MediaAutomationScripts'):
+            self.assertIn(line, banner)
+        self.assertNotIn('\033[', text, 'redirected output must not contain colour codes')
+        self.assertLess(text.index('1 video found'), text.index('[1/1] clip_new.mp4'))
         self.assertIn('clip_new.mp4', text.split('[1/1]')[0])
+        self.assertRegex(text, r'1\s+PASS\s+0\s+0\s+\S+\s+clip_new\.mp4')
         self.assertTrue(verify.call_args.kwargs['strict_timing'])
         self.assertEqual(code, 0)
 
@@ -330,7 +332,7 @@ class LogicTests(unittest.TestCase):
             self.assertEqual(code, 0)
             verify.assert_called_once()
             self.assertEqual(verify.call_args.args[0], selected.resolve())
-            self.assertIn('Videos detected: 1', output.getvalue())
+            self.assertIn('1 video found', output.getvalue())
             self.assertNotIn('unselected.mp4', output.getvalue())
 
     @mock.patch.object(vv, 'verify', return_value=vv.Result())
@@ -418,7 +420,7 @@ class LogicTests(unittest.TestCase):
         output = io.StringIO()
         output.isatty = lambda: True
         with mock.patch.object(vv.time, 'monotonic', side_effect=[0, 0.1, 1, 2]):
-            with vv.Progress(vv.Reporter(output), 'FFprobe: video stream 0', 10) as progress:
+            with vv.Progress(vv.Reporter(output), 'FFprobe', 'video stream 0', 10) as progress:
                 progress.update(1, 60)
                 progress.update(5, 300)
         text = output.getvalue()
@@ -430,7 +432,7 @@ class LogicTests(unittest.TestCase):
     def test_redirected_progress_is_sparse_and_does_not_use_carriage_returns(self):
         output = io.StringIO()
         with mock.patch.object(vv.time, 'monotonic', side_effect=[0, 1, 31, 32]):
-            with vv.Progress(vv.Reporter(output), 'FFmpeg: decode', 10) as progress:
+            with vv.Progress(vv.Reporter(output), 'FFmpeg', 'decode', 10) as progress:
                 progress.update(1)
                 progress.update(5)
         text = output.getvalue()
@@ -442,11 +444,47 @@ class LogicTests(unittest.TestCase):
     def test_missing_duration_shows_processed_time_without_a_percentage(self):
         output = io.StringIO()
         with mock.patch.object(vv.time, 'monotonic', side_effect=[0, 31, 32]):
-            with vv.Progress(vv.Reporter(output), 'FFprobe: video stream 0') as progress:
+            with vv.Progress(vv.Reporter(output), 'FFprobe', 'video stream 0') as progress:
                 progress.update(5, 300)
         text = output.getvalue()
         self.assertIn('0:05.00 processed', text)
         self.assertNotIn('%', text)
+
+    def test_stage_failures_are_marked_in_the_completed_line(self):
+        output = io.StringIO()
+        with self.assertRaises(ValueError):
+            with vv.Progress(vv.Reporter(output), 'FFprobe', 'original metadata', severity='warn'):
+                raise ValueError('bad')
+        with vv.Progress(vv.Reporter(output), 'FFmpeg', 'decode all A/V streams') as progress:
+            progress.state = 'error'
+        lines = output.getvalue().splitlines()
+        self.assertRegex(lines[1], r'▲ FFprobe\s+original metadata')
+        self.assertIn('see warnings below', lines[1])
+        self.assertRegex(lines[3], r'✗ FFmpeg\s+decode all A/V streams')
+        self.assertIn('see errors below', lines[3])
+
+    def test_colour_only_on_terminals_and_respects_no_color(self):
+        terminal = io.StringIO()
+        terminal.isatty = lambda: True
+        with mock.patch.object(vv, 'enable_ansi', return_value=True), mock.patch.dict(vv.os.environ, clear=True):
+            self.assertIn('\033[32m', vv.Reporter(terminal).paint('ok', vv.GREEN))
+            with mock.patch.dict(vv.os.environ, {'NO_COLOR': '1'}):
+                self.assertEqual(vv.Reporter(terminal).paint('ok', vv.GREEN), 'ok')
+        self.assertEqual(vv.Reporter(io.StringIO()).paint('ok', vv.GREEN), 'ok')
+
+    def test_legacy_encodings_fall_back_to_ascii_symbols(self):
+        output = io.TextIOWrapper(io.BytesIO(), encoding='cp1252')
+        reporter = vv.Reporter(output)
+        self.assertEqual(reporter.symbols['done'], '+')
+        line = reporter.stage('done', 'FFprobe', 'metadata', ['3 A/V streams', '0:01.00'], 0.5)
+        line.encode('cp1252')
+        self.assertIn('3 A/V streams | 0:01.00', line)
+
+    def test_fit_truncates_visible_text_without_breaking_colour_codes(self):
+        text = '\033[32m' + 'a' * 10 + '\033[0m' + 'b' * 10
+        fitted = vv.fit(text, 12)
+        self.assertEqual(vv.visible_width(fitted), 12)
+        self.assertTrue(fitted.startswith('\033[32m' + 'a' * 10 + '\033[0m'))
 
     @mock.patch.object(vv, 'run_streaming')
     def test_ffmpeg_progress_uses_microseconds_and_keeps_decode_errors(self, run):
@@ -559,9 +597,10 @@ class MediaTests(unittest.TestCase):
         process = subprocess.run([sys.executable, '-B', vv.__file__, '-f', str(folder)], cwd=folder,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertEqual(process.returncode, 1, process.stderr)
-        self.assertIn('FAILED: 00broken.mkv', process.stdout)
+        self.assertRegex(process.stdout, r'FAIL\s+\d+\s+\d+\s+\S+\s+00broken\.mkv')
         self.assertIn('99clean.MKV', process.stdout)
-        self.assertIn('2 video(s), 1 failure(s)', process.stdout)
+        self.assertIn('1 failed', process.stdout)
+        self.assertIn('2 videos in', process.stdout)
         self.assertEqual((folder / 'corrupted_files.txt').read_text().strip(), '00broken.mkv')
 
     def test_cli_specific_file_compares_original_without_checking_neighbors(self):
@@ -576,8 +615,9 @@ class MediaTests(unittest.TestCase):
                                   '-s', '--strict-timing'], cwd=folder,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
-        self.assertIn('Original: selected.mkv', process.stdout)
-        self.assertIn('1 video(s), 0 failure(s)', process.stdout)
+        self.assertRegex(process.stdout, r'Original\s+selected\.mkv')
+        self.assertIn('0 failed', process.stdout)
+        self.assertIn('1 video in', process.stdout)
         self.assertNotIn('unselected_new.mkv', process.stdout)
         self.assertFalse((folder / 'corrupted_files.txt').exists())
 
@@ -606,9 +646,9 @@ class MediaTests(unittest.TestCase):
         result = vv.verify(output, self.ffprobe, self.ffmpeg, staxrip=True, reporter=vv.Reporter(log))
         self.assertEqual(result.errors, [], result.errors)
         self.assertTrue(any('Frame timing rounded' in w for w in result.warnings), result.warnings)
-        for stage in ('FFprobe: output metadata', 'FFprobe: output video', 'FFmpeg: decode all',
-                      'FFprobe: original metadata', 'Compare original:', 'Check audio/video'):
-            self.assertIn(stage, log.getvalue())
+        for stage in (r'FFprobe\s+metadata', r'FFprobe\s+video stream', r'FFmpeg\s+decode all',
+                      r'FFprobe\s+original metadata', r'Compare\s+frame counts', r'Check\s+A/V durations'):
+            self.assertRegex(log.getvalue(), stage)
         strict = vv.verify(output, self.ffprobe, self.ffmpeg, staxrip=True, strict_timing=True)
         self.assertTrue(any('Frame timing changed' in e for e in strict.errors), strict.errors)
         self.encode(output, ['-copyts', '-i', str(original)],

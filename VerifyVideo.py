@@ -5,7 +5,9 @@ from fractions import Fraction
 from itertools import islice
 import json
 import math
+import os
 import pathlib
+import re
 import shutil
 import statistics
 import subprocess
@@ -17,6 +19,19 @@ import time
 video_file_extensions = ['.mkv', '.mp4', '.avi', '.webm']
 current_directory = pathlib.Path(__file__).resolve().parent
 
+BOLD, RED, GREEN, YELLOW, CYAN, GRAY = '1', '31', '32', '33', '36', '90'
+ANSI_CODE = re.compile(r'(\033\[[0-9;]*[A-Za-z])')
+STATE_COLOURS = {'done': GREEN, 'error': RED, 'warn': YELLOW, 'skip': GRAY, 'note': CYAN}
+VERDICTS = {'OK': ('PASSED', 'PASS', GREEN), 'OK WITH WARNINGS': ('PASSED WITH WARNINGS', 'WARN', YELLOW),
+            'FAILED': ('FAILED', 'FAIL', RED)}
+UNICODE_SYMBOLS = {'done': '✓', 'error': '✗', 'warn': '▲', 'skip': '–', 'note': '→', 'bullet': '●',
+                   'branch': '├─', 'last': '└─', 'stem': '│', 'bar': '━', 'track': '━', 'dot': '·',
+                   'rule': '─', 'box': '╭╮╰╯─│', 'spinner': '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'}
+ASCII_SYMBOLS = {'done': '+', 'error': 'x', 'warn': '!', 'skip': '-', 'note': '>', 'bullet': '*',
+                 'branch': '|-', 'last': '`-', 'stem': '|', 'bar': '#', 'track': '-', 'dot': '|',
+                 'rule': '-', 'box': '++++-|', 'spinner': '|/-\\'}
+TOOL_WIDTH, LABEL_WIDTH, DETAIL_WIDTH = 9, 25, 28
+
 
 def clock_time(seconds):
     seconds = max(0, seconds)
@@ -25,65 +40,178 @@ def clock_time(seconds):
     return f'{int(hours)}:{int(minutes):02}:{seconds:05.2f}' if hours else f'{int(minutes)}:{seconds:05.2f}'
 
 
+def plural(count, word):
+    return f'{count:,} {word}{"" if count == 1 else "s"}'
+
+
+def is_terminal(stream):
+    try:
+        return stream.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def enable_ansi(stream):
+    """Enable escape sequences in a Windows console using only the standard library."""
+    if os.name != 'nt':
+        return os.environ.get('TERM') != 'dumb'
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        handle = wintypes.HANDLE(msvcrt.get_osfhandle(stream.fileno()))
+        mode = wintypes.DWORD()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        # 0x0004 = ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        return bool(mode.value & 0x0004 or kernel32.SetConsoleMode(handle, mode.value | 0x0004))
+    except (ImportError, AttributeError, OSError, ValueError):
+        return False
+
+
+def supports_unicode(stream):
+    try:
+        ''.join(UNICODE_SYMBOLS.values()).encode(getattr(stream, 'encoding', None) or 'utf-8')
+        return True
+    except (UnicodeEncodeError, LookupError):
+        return False
+
+
+def visible_width(text):
+    return len(ANSI_CODE.sub('', text))
+
+
+def fit(text, width):
+    """Truncate to a visible width without cutting escape sequences in half."""
+    parts, visible = [], 0
+    for piece in ANSI_CODE.split(text):
+        if ANSI_CODE.fullmatch(piece):
+            parts.append(piece)
+        else:
+            parts.append(piece[:max(0, width - visible)])
+            visible += len(piece)
+    return ''.join(parts)
+
+
 class Reporter:
+    """Writes status output, using colour and Unicode only where the stream supports them."""
     def __init__(self, output=None):
         self.output = output if output is not None else sys.stdout
+        self.interactive = is_terminal(self.output)
+        self.ansi = self.interactive and enable_ansi(self.output)
+        self.colour = self.ansi and not os.environ.get('NO_COLOR')
+        unicode = supports_unicode(self.output)
+        self.symbols = dict(UNICODE_SYMBOLS if unicode else ASCII_SYMBOLS)
+        if unicode and not self.colour:
+            self.symbols['track'] = '─'  # Keep the progress bar readable without colour.
 
-    def message(self, message):
+    def message(self, message=''):
         print(message, file=self.output, flush=True)
+
+    def paint(self, text, *codes):
+        text = str(text)
+        return f'\033[{";".join(codes)}m{text}\033[0m' if self.colour and codes and text else text
+
+    def join(self, parts):
+        return f' {self.symbols["dot"]} '.join(parts)
+
+    def bar(self, fraction, width=20):
+        filled = int(fraction * width)
+        return (self.paint(self.symbols['bar'] * filled, CYAN) +
+                self.paint(self.symbols['track'] * (width - filled), GRAY))
+
+    def stage(self, state, tool, label, details=(), elapsed=None):
+        detail = self.join(details).ljust(DETAIL_WIDTH)
+        line = (f'  {self.paint(self.symbols[state], STATE_COLOURS[state], BOLD)} '
+                f'{self.paint(tool.ljust(TOOL_WIDTH), GRAY)}{label.ljust(LABEL_WIDTH)}'
+                f'{self.paint(detail, RED) if state == "error" else detail}')
+        if elapsed is not None:
+            line += self.paint(clock_time(elapsed).rjust(8), GRAY)
+        return line.rstrip()
 
 
 class Progress:
-    """One line per stage in a terminal; occasional updates in redirected logs."""
-    def __init__(self, reporter, label, total=None):
-        self.output = reporter.output if reporter else None
+    """A live status line per stage in a terminal; occasional plain updates in redirected logs."""
+    def __init__(self, reporter, tool, label, total=None, severity='error'):
+        self.reporter = reporter
+        self.tool = tool
         self.label = label
         self.total = total if total is not None and math.isfinite(total) and total > 0 else None
-        self.interactive = bool(self.output and self.output.isatty())
+        self.severity = severity  # State used when the stage raises.
+        self.interactive = bool(reporter and reporter.interactive)
         self.started = time.monotonic()
         self.updated = self.started
         self.width = 0
-        self.detail = ''
-        self.issues = False
+        self.frame = 0
+        self.detail = []
+        self.state = None  # None (done), 'warn' or 'error'.
 
     def __enter__(self):
-        self.write(f'  {self.label} ...')
+        if self.reporter:
+            self.write(self.running_line() if self.interactive else
+                       f'    {self.tool.ljust(TOOL_WIDTH)}{self.label} ...')
         return self
 
     def write(self, text, final=False):
-        if self.output is None:
+        reporter = self.reporter
+        if reporter is None:
             return
-        if self.interactive:
-            text = text[:max(20, shutil.get_terminal_size((100, 20)).columns - 1)]
-            print('\r' + text.ljust(self.width), end='\n' if final else '', file=self.output, flush=True)
-            self.width = len(text)
+        if not self.interactive:
+            reporter.message(text)
+            return
+        text = fit(text, max(20, shutil.get_terminal_size((100, 20)).columns - 1))
+        if reporter.ansi:
+            text += '\033[K'
         else:
-            print(text, file=self.output, flush=True)
+            width = visible_width(text)
+            text += ' ' * max(0, self.width - width)
+            self.width = width
+        print('\r' + text, end='\n' if final else '', file=reporter.output, flush=True)
+
+    def running_line(self, fraction=None, details=()):
+        reporter = self.reporter
+        spinner = reporter.symbols['spinner']
+        line = (f'  {reporter.paint(spinner[self.frame % len(spinner)], CYAN)} '
+                f'{reporter.paint(self.tool.ljust(TOOL_WIDTH), GRAY)}{self.label.ljust(LABEL_WIDTH)}')
+        self.frame += 1
+        if fraction is not None:
+            line += f'{reporter.bar(fraction)} {fraction * 100:5.1f}%  '
+        return line + reporter.paint(reporter.join(details), GRAY)
 
     def update(self, position=None, count=None):
-        if self.output is None:
+        if self.reporter is None:
             return
         now = time.monotonic()
-        if now - self.updated < (0.5 if self.interactive else 30):
+        if now - self.updated < (0.25 if self.interactive else 30):
             return
         self.updated = now
+        fraction = None
         details = []
         if position is not None and math.isfinite(position):
             position = max(0, position)
             if self.total:
-                details.append(f'{min(99.9, position / self.total * 100):5.1f}%')
+                fraction = min(0.999, position / self.total)
                 details.append(f'{clock_time(position)} / {clock_time(self.total)}')
             else:
                 details.append(f'{clock_time(position)} processed')
         if count is not None:
             details.append(f'{count:,} frames')
         details.append(f'elapsed {clock_time(now - self.started)}')
-        self.write(f'  {self.label}: ' + ' | '.join(details))
+        if self.interactive:
+            self.write(self.running_line(fraction, details))
+        else:
+            percent = [f'{fraction * 100:5.1f}%'] if fraction is not None else []
+            self.write(f'    {self.tool.ljust(TOOL_WIDTH)}{self.label}: ' + ' | '.join(percent + details))
 
     def __exit__(self, exc_type, exc_value, traceback):
-        status = 'failed' if exc_type else 'issues found' if self.issues else 'done'
-        detail = f'; {self.detail}' if self.detail else ''
-        self.write(f'  {self.label}: {status}{detail} (elapsed {clock_time(time.monotonic() - self.started)})', final=True)
+        if self.reporter is None:
+            return
+        state = self.severity if exc_type else self.state or 'done'
+        details = self.detail or ([] if state == 'done' else
+                                  ['see errors below' if state == 'error' else 'see warnings below'])
+        self.write(self.reporter.stage(state, self.tool, self.label, details,
+                                       time.monotonic() - self.started), final=True)
 
 
 @dataclass
@@ -303,12 +431,14 @@ def timestamp_checks(streams, result, source=False, strict_timing=False):
 def inspect_video(file, ffprobe, result, source=False, strict_timing=False, reporter=None):
     issues = result.warnings if source else result.errors
     prefix = 'Original: ' if source else ''
+    severity = 'warn' if source else 'error'
+    label = 'original ' if source else ''
     try:
-        label = 'original' if source else 'output'
-        with Progress(reporter, f'FFprobe: {label} metadata') as progress:
+        with Progress(reporter, 'FFprobe', label + 'metadata', severity=severity) as progress:
             streams, duration, errors = probe_metadata(file, ffprobe)
-            progress.detail = f'{len(streams)} A/V stream(s)'
-            progress.issues = bool(errors)
+            progress.detail = [plural(len(streams), 'A/V stream')]
+            if errors:
+                progress.state = severity
         incomplete = bool(errors)
         issues.extend(prefix + message for message in errors)
         videos = [stream for stream in streams if stream.kind == 'video']
@@ -319,13 +449,14 @@ def inspect_video(file, ffprobe, result, source=False, strict_timing=False, repo
             return [], duration
         for stream in streams:
             try:
-                with Progress(reporter, f'FFprobe: {label} {stream.kind} stream {stream.index}',
-                              stream.expected_duration or duration) as progress:
+                with Progress(reporter, 'FFprobe', f'{label}{stream.kind} stream {stream.index}',
+                              stream.expected_duration or duration, severity=severity) as progress:
                     errors = scan_stream(file, stream, ffprobe, progress) if reporter else scan_stream(file, stream, ffprobe)
-                    progress.detail = f'{stream.count:,} frames'
+                    progress.detail = [f'{stream.count:,} frames']
                     if stream.duration is not None:
-                        progress.detail += f', media {clock_time(stream.duration)}'
-                    progress.issues = bool(errors) or not stream.count
+                        progress.detail.append(clock_time(stream.duration))
+                    if errors or not stream.count:
+                        progress.state = severity
                 incomplete |= bool(errors)
                 issues.extend(prefix + message for message in errors)
                 if not stream.count:
@@ -519,16 +650,17 @@ def verify(file, ffprobe, ffmpeg, staxrip=False, ignore_ffmpeg=False, strict_tim
     if ignore_ffmpeg:
         result.warnings.append('Independent FFmpeg decode check skipped (--ignore-ffmpeg).')
         if reporter:
-            reporter.message('  FFmpeg: independent decode check skipped (--ignore-ffmpeg)')
+            reporter.message(reporter.stage('skip', 'FFmpeg', 'decode check', ['skipped (--ignore-ffmpeg)']))
     else:
         try:
             starts = [s.start for s in streams if math.isfinite(s.start)]
             ends = [s.end for s in streams if math.isfinite(s.end)]
             decode_duration = max(ends) - min(starts) if starts and ends else duration
-            with Progress(reporter, 'FFmpeg: decode all output video/audio streams', decode_duration) as progress:
+            with Progress(reporter, 'FFmpeg', 'decode all A/V streams', decode_duration) as progress:
                 errors = ffmpeg_check(file, streams, ffmpeg, progress)
                 result.errors.extend(errors)
-                progress.issues = bool(errors)
+                if errors:
+                    progress.state = 'error'
         except OSError as error:
             result.errors.append(f'Could not run FFmpeg: {error}')
     source = []
@@ -539,19 +671,21 @@ def verify(file, ffprobe, ffmpeg, staxrip=False, ignore_ffmpeg=False, strict_tim
                 result.warnings.append(warning)
             else:
                 if reporter:
-                    reporter.message('  Original: ' + original.name)
+                    reporter.message(reporter.stage('note', 'Original', original.name))
                 source, _ = inspect_video(original, ffprobe, result, source=True, **options)
-                with Progress(reporter, 'Compare original: frame counts and timing') as progress:
-                    previous = len(result.errors), len(result.warnings)
+                with Progress(reporter, 'Compare', 'frame counts & timing') as progress:
+                    errors, warnings = len(result.errors), len(result.warnings)
                     compare_original(source, streams, result, strict_timing=strict_timing)
-                    progress.issues = previous != (len(result.errors), len(result.warnings))
-                    progress.detail = 'strict timing' if strict_timing else 'allow verified timestamp rounding'
+                    progress.state = ('error' if len(result.errors) != errors else
+                                      'warn' if len(result.warnings) != warnings else None)
+                    progress.detail = ['strict timing' if strict_timing else 'rounding allowed']
         except OSError as error:
             result.warnings.append(f'Could not locate original; source comparison skipped: {error}')
-    with Progress(reporter, 'Check audio/video durations and start offsets') as progress:
+    with Progress(reporter, 'Check', 'A/V durations & offsets', severity='warn') as progress:
         previous = len(result.warnings)
         duration_checks(streams, duration, result, original=source)
-        progress.issues = len(result.warnings) != previous
+        if len(result.warnings) != previous:
+            progress.state = 'warn'
     return result
 
 
@@ -570,22 +704,31 @@ def main(argv=None):
     directories = [pathlib.Path(p).resolve() for p in args.folder]
     if not directories and not selected_files:
         directories = [current_directory]
-    print('-----------------VerifyVideo-----------------')
-    print('Script to check for corrupted videos')
-    print('by Kidsnd274')
-    print('https://github.com/Kidsnd274/MediaAutomationScripts')
-    print('')
-    if directories:
-        print('Folders:')
+    reporter = Reporter()
+    say, paint, symbols = reporter.message, reporter.paint, reporter.symbols
+
+    def display(path):
         for directory in directories:
-            print('  ' + str(directory))
-    print('Checks: FFprobe scans' + ('' if args.ignore_ffmpeg else ' + FFmpeg decode') +
-          (' + original comparison' if args.staxrip else ''))
-    print('Timing: ' + ('strict preservation' if args.strict_timing else 'verified timestamp rounding warns'))
+            try:
+                return str(path.relative_to(directory))
+            except ValueError:
+                pass
+        return str(path)
+
+    print_banner(reporter)
+    settings = [('Folders' if len(directories) > 1 else 'Folder', str(directory)) for directory in directories[:1]]
+    settings += [('', str(directory)) for directory in directories[1:]]
+    settings.append(('Checks', 'FFprobe scans' + ('' if args.ignore_ffmpeg else ' + FFmpeg decode') +
+                     (' + original comparison' if args.staxrip else '')))
+    settings.append(('Timing', 'strict preservation' if args.strict_timing else 'verified timestamp rounding warns'))
     if args.recursive:
-        print('Include subfolders: yes')
+        settings.append(('Subfolders', 'included'))
+    for key, value in settings:
+        say(f'  {paint(key.ljust(11), GRAY)}{value}')
+
     files = set()
     failed = []
+    problems = []
     for file in selected_files:
         try:
             if not file.is_file():
@@ -596,7 +739,7 @@ def main(argv=None):
                 raise ValueError("--staxrip requires a filename ending in '_new' to locate its original.")
             files.add(file)
         except (OSError, ValueError) as error:
-            print(f'FAILED: Cannot select {file}: {error}')
+            problems.append(f'Cannot select {file}: {error}')
             if file not in failed:
                 failed.append(file)
     for directory in directories:
@@ -606,47 +749,94 @@ def main(argv=None):
                         and (not args.staxrip or file.stem.endswith('_new'))):
                     files.add(file)
         except OSError as error:
-            print(f'FAILED: Cannot scan {directory}: {error}')
+            problems.append(f'Cannot scan {directory}: {error}')
             failed.append(directory)
+    if problems:
+        say()
+        for problem in problems:
+            say(f'  {paint(symbols["error"], RED, BOLD)} {paint(problem, RED)}')
     if not files and not failed:
-        print('No video files found')
+        say()
+        say('  No video files found')
         return 0
     files = sorted(files)
-    print(f'\nVideos detected: {len(files)}')
+    say()
+    say(f'  {paint(plural(len(files), "video"), BOLD)} found')
+    number_width = len(str(len(files)))
     for index, file in enumerate(files, 1):
-        print(f'  {index}. {file}')
+        say(f'  {paint(str(index).rjust(number_width + 2), GRAY)}  {display(file)}')
+
     warnings = passed = 0
+    checked = []
     started = time.monotonic()
-    reporter = Reporter()
     for index, file in enumerate(files, 1):
-        print(f'\n[{index}/{len(files)}] Checking: {file.name}', flush=True)
+        say()
+        say(f'{paint(f"[{index}/{len(files)}]", CYAN, BOLD)} {paint(display(file), BOLD)}')
         file_started = time.monotonic()
         result = verify(file, executable('ffprobe'), executable('ffmpeg'), args.staxrip, args.ignore_ffmpeg,
                         strict_timing=args.strict_timing, reporter=reporter)
-        for message in result.warnings:
-            print('  WARN:', message)
-        for message in result.errors:
-            print('  ERROR:', message)
-        counts = f'{len(result.errors)} error(s), {len(result.warnings)} warning(s)'
-        print(f'{result.status}: {file.name} ({counts}; elapsed {clock_time(time.monotonic() - file_started)})', flush=True)
-        warnings += bool(result.warnings)
+        elapsed = time.monotonic() - file_started
+        messages = [('warn', message) for message in result.warnings] + [('error', message) for message in result.errors]
+        if messages:
+            say(f'  {paint(symbols["stem"], GRAY)}')
+            for position, (state, message) in enumerate(messages, 1):
+                branch = symbols['last' if position == len(messages) else 'branch']
+                say(f'  {paint(branch, GRAY)} {paint(symbols[state], STATE_COLOURS[state], BOLD)} {message}')
+        verdict, _, colour = VERDICTS[result.status]
+        counts = reporter.join([plural(len(result.errors), 'error'), plural(len(result.warnings), 'warning'),
+                                clock_time(elapsed)])
+        say(f'  {paint(symbols["bullet"], colour)} {paint(verdict, colour, BOLD)}  {paint(counts, GRAY)}')
+        checked.append((file, result, elapsed))
         if result.errors:
             failed.append(file)
         else:
             passed += 1
+            warnings += bool(result.warnings)
+
+    say()
+    say(paint(symbols['rule'] * 30 + ' Summary ' + symbols['rule'] * 30, GRAY))
+    if checked:
+        width = max(2, number_width)
+        say(paint(f'  {"#":>{width}}  {"Result":<6}  {"Err":>3}  {"Warn":>4}  {"Time":>8}  File', GRAY))
+        for index, (file, result, elapsed) in enumerate(checked, 1):
+            _, word, colour = VERDICTS[result.status]
+            errors = paint(f'{len(result.errors):>3}', RED, BOLD) if result.errors else f'{0:>3}'
+            warned = paint(f'{len(result.warnings):>4}', YELLOW) if result.warnings else f'{0:>4}'
+            say(f'  {index:>{width}}  {paint(f"{word:<6}", colour, BOLD)}  {errors}  {warned}  '
+                f'{clock_time(elapsed):>8}  {display(file)}')
+        say()
+    totals = [(f'{symbols["done"]} {passed} passed', passed, GREEN),
+              (f'{symbols["warn"]} {warnings} with warnings', warnings, YELLOW),
+              (f'{symbols["error"]} {len(failed)} failed', len(failed), RED)]
+    say('  ' + '   '.join(paint(text, colour, BOLD) if count else paint(text, GRAY) for text, count, colour in totals) +
+        '   ' + paint(f'{plural(len(files), "video")} in {clock_time(time.monotonic() - started)}', GRAY))
     if failed:
-        print('\nFailed files/checks:')
+        say()
+        say(f'  {paint("Failed", RED, BOLD)}')
         for file in failed:
-            print(file)
+            say(f'    {paint(symbols["error"], RED)} {display(file)}')
         try:
             report = pathlib.Path('corrupted_files.txt')
             report.write_text(''.join(file.name + '\n' for file in failed), encoding='utf-8')
-            print('Failure report:', report.resolve())
+            say(f'  {paint("Report", GRAY)}  {report.resolve()}')
         except OSError as error:
-            print('WARN: Could not write corrupted_files.txt:', error)
-    print(f'\nAll files checked: {len(files)} video(s), {len(failed)} failure(s), {warnings} with warnings.')
-    print(f'Passed: {passed} | Total elapsed: {clock_time(time.monotonic() - started)}')
+            say(f'  {paint(symbols["warn"], YELLOW, BOLD)} Could not write corrupted_files.txt: {error}')
     return 1 if failed else 0
+
+
+def print_banner(reporter):
+    symbols = reporter.symbols
+    top_left, top_right, bottom_left, bottom_right, line, side = symbols['box']
+    lines = [('VerifyVideo', (BOLD, CYAN)),
+             (f'Script to check for corrupted videos {symbols["dot"]} by Kidsnd274', ()),
+             ('https://github.com/Kidsnd274/MediaAutomationScripts', (GRAY,))]
+    width = max(len(text) for text, _ in lines) + 4
+    reporter.message(reporter.paint(top_left + line * width + top_right, GRAY))
+    for text, codes in lines:
+        reporter.message(reporter.paint(side, GRAY) + '  ' + reporter.paint(text.ljust(width - 2), *codes) +
+                         reporter.paint(side, GRAY))
+    reporter.message(reporter.paint(bottom_left + line * width + bottom_right, GRAY))
+    reporter.message()
 
 
 if __name__ == '__main__':
