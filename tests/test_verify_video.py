@@ -150,15 +150,16 @@ class LogicTests(unittest.TestCase):
             original.touch()
             self.assertEqual(vv.find_original(output), (original, None))
 
-    @mock.patch.object(vv.subprocess, 'run')
+    @mock.patch.object(vv, 'run_streaming')
     def test_ffmpeg_errors_with_zero_exit_fail(self, run):
-        run.return_value = subprocess.CompletedProcess([], 0, stderr='error while decoding MB\n')
+        run.return_value = (0, ['error while decoding MB'])
         errors = vv.ffmpeg_check(pathlib.Path('clip.mkv'), [audio(3, index=0), video(index=3)], 'ffmpeg')
         self.assertIn('error while decoding MB', errors)
         command = run.call_args.args[0]
         self.assertIn('-xerror', command)
         self.assertIn('0:0', command)
         self.assertIn('0:3', command)
+        self.assertIn('pipe:1', command)
 
     @mock.patch.object(vv.subprocess, 'run')
     def test_metadata_selects_types_and_excludes_cover_art(self, run):
@@ -193,7 +194,7 @@ class LogicTests(unittest.TestCase):
     @mock.patch.object(vv, 'ffmpeg_check')
     @mock.patch.object(vv, 'inspect_video')
     def test_ignore_ffmpeg_warns_but_probe_errors_still_fail(self, inspect, ffmpeg):
-        def inspect_file(file, probe, result):
+        def inspect_file(file, probe, result, **kwargs):
             result.errors.append('damaged frame')
             return [video()], 3
         inspect.side_effect = inspect_file
@@ -212,6 +213,261 @@ class LogicTests(unittest.TestCase):
                 code = vv.main(['-f', folder])
             self.assertEqual(code, 1)
             self.assertEqual(verify.call_count, 2)
+
+    def rounded_pair(self):
+        # ShadowPlay-style jitter, followed by encoder rounding to a 60 Hz grid.
+        source = video((0, 0.016522, 0.033811, 0.050744, 0.066300, 0.083333), tick=1 / 90000)
+        output = video(tuple(round(t * 60) / 60 for t in source.timestamps), tick=1 / 15360)
+        output.frame_rate = 60
+        return source, output
+
+    def test_nearest_frame_grid_rounding_warns_instead_of_failing(self):
+        source, output = self.rounded_pair()
+        result = vv.Result()
+        vv.compare_original([source], [output], result)
+        self.assertEqual(result.status, 'OK WITH WARNINGS', result.errors)
+        self.assertTrue(any('Frame timing rounded' in w for w in result.warnings))
+
+    def test_strict_timing_rejects_the_same_rounding(self):
+        source, output = self.rounded_pair()
+        result = vv.Result()
+        vv.compare_original([source], [output], result, strict_timing=True)
+        self.assertTrue(any('Frame timing changed' in e for e in result.errors))
+
+    def test_small_arbitrary_jitter_is_not_excused_as_grid_rounding(self):
+        source, output = self.rounded_pair()
+        output.timestamps[2] += 0.001
+        result = vv.Result()
+        vv.compare_original([source], [output], result)
+        self.assertTrue(any('Frame timing changed' in e for e in result.errors))
+
+    def test_progressive_drift_fails_even_if_output_is_on_a_grid(self):
+        source = video(tuple(i / 60 for i in range(10)), tick=1 / 60000)
+        output = video(tuple(i / 50 for i in range(10)), tick=1 / 60000)
+        output.frame_rate = 50
+        result = vv.Result()
+        vv.compare_original([source], [output], result)
+        self.assertTrue(any('Frame timing changed' in e for e in result.errors))
+
+    def test_quantization_does_not_relax_frame_counts(self):
+        source, output = self.rounded_pair()
+        output.timestamps.pop()
+        output.count -= 1
+        result = vv.Result()
+        vv.compare_original([source], [output], result)
+        self.assertTrue(any('Frame count changed' in e for e in result.errors))
+        self.assertFalse(any('Frame timing rounded' in w for w in result.warnings))
+
+    def test_rounding_with_a_constant_shift_warns(self):
+        source, output = self.rounded_pair()
+        output.timestamps = array('d', (t + 5 for t in output.timestamps))
+        result = vv.Result()
+        vv.compare_original([source], [output], result)
+        self.assertEqual(result.status, 'OK WITH WARNINGS', result.errors)
+
+    def test_quantization_collision_warns_and_strict_mode_fails(self):
+        source = video((0, 0.027689, 0.033722, 0.050044), tick=1 / 90000)
+        output = video((0, 1 / 30, 1 / 30, 0.05), tick=1 / 15360)
+        output.frame_rate = 60
+        result = vv.Result()
+        vv.compare_original([source], [output], result)
+        self.assertEqual(result.errors, [], result.errors)
+        self.assertTrue(any('Duplicate presentation' in w for w in result.warnings))
+        strict = vv.Result()
+        vv.compare_original([source], [output], strict, strict_timing=True)
+        self.assertTrue(any('Duplicate presentation' in e for e in strict.errors))
+
+    def test_backwards_output_timestamps_fail_without_an_original(self):
+        result = vv.Result()
+        vv.timestamp_checks([video((0, 0.04, 0.02))], result)
+        self.assertTrue(any('Backwards presentation' in e for e in result.errors))
+
+    def test_inherited_audio_end_difference_is_identified(self):
+        source = [video((0, 1, 2)), audio(2.9)]
+        result = vv.Result()
+        vv.duration_checks([video((0, 1, 2)), audio(2.9)], None, result, original=source)
+        self.assertTrue(any('Already present in original' in w for w in result.warnings))
+
+    def test_new_audio_end_difference_is_not_labelled_inherited(self):
+        source = [video((0, 1, 2)), audio(3)]
+        result = vv.Result()
+        vv.duration_checks([video((0, 1, 2)), audio(2.9)], None, result, original=source)
+        self.assertTrue(any('A/V duration mismatch' in w for w in result.warnings))
+        self.assertFalse(any('Already present' in w for w in result.warnings))
+
+    def test_larger_video_overhang_is_not_labelled_inherited(self):
+        source = [video((0, 1, 2)), audio(2.9)]
+        result = vv.Result()
+        vv.duration_checks([video((0, 1, 2, 3)), audio(2.9)], None, result, original=source)
+        self.assertFalse(any('Already present' in w for w in result.warnings))
+
+    @mock.patch.object(vv, 'verify', return_value=vv.Result())
+    def test_cli_banner_file_list_and_strict_option(self, verify):
+        with tempfile.TemporaryDirectory() as folder:
+            (pathlib.Path(folder) / 'clip_new.mp4').touch()
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = vv.main(['-f', folder, '-s', '--strict-timing'])
+        text = output.getvalue()
+        banner = ('-----------------VerifyVideo-----------------\n'
+                  'Script to check for corrupted videos\nby Kidsnd274\n'
+                  'https://github.com/Kidsnd274/MediaAutomationScripts\n\n')
+        self.assertTrue(text.startswith(banner))
+        self.assertLess(text.index('Videos detected: 1'), text.index('[1/1] Checking:'))
+        self.assertIn('clip_new.mp4', text.split('[1/1]')[0])
+        self.assertTrue(verify.call_args.kwargs['strict_timing'])
+        self.assertEqual(code, 0)
+
+    @mock.patch.object(vv, 'verify', return_value=vv.Result())
+    def test_file_selection_only_checks_the_requested_file(self, verify):
+        with tempfile.TemporaryDirectory() as folder:
+            selected = pathlib.Path(folder) / 'selected video.MP4'
+            selected.touch()
+            (pathlib.Path(folder) / 'unselected.mp4').touch()
+            output = io.StringIO()
+            with mock.patch.object(vv, 'current_directory', pathlib.Path(folder)), contextlib.redirect_stdout(output):
+                code = vv.main(['--file', str(selected)])
+            self.assertEqual(code, 0)
+            verify.assert_called_once()
+            self.assertEqual(verify.call_args.args[0], selected.resolve())
+            self.assertIn('Videos detected: 1', output.getvalue())
+            self.assertNotIn('unselected.mp4', output.getvalue())
+
+    @mock.patch.object(vv, 'verify', return_value=vv.Result())
+    def test_files_and_folders_are_combined_and_deduplicated(self, verify):
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            batch = root / 'batch'
+            nested = batch / 'nested'
+            nested.mkdir(parents=True)
+            expected = [batch / 'a.mp4', batch / 'b.MKV', nested / 'c.webm', root / 'extra.avi']
+            for file in expected:
+                file.touch()
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = vv.main(['-f', str(batch), '--file', str(expected[0]), str(expected[-1]),
+                                '--file', str(expected[-1]), '-r'])
+            self.assertEqual(code, 0)
+            self.assertEqual([call.args[0] for call in verify.call_args_list], sorted(p.resolve() for p in expected))
+
+    @mock.patch.object(vv, 'verify', return_value=vv.Result())
+    def test_file_selection_forwards_comparison_and_decode_options(self, verify):
+        with tempfile.TemporaryDirectory() as folder:
+            selected = pathlib.Path(folder) / 'clip_new.mp4'
+            selected.touch()
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = vv.main(['--file', str(selected), '-s', '--strict-timing', '-if'])
+            self.assertEqual(code, 0)
+            self.assertEqual(verify.call_args.args[3:5], (True, True))
+            self.assertTrue(verify.call_args.kwargs['strict_timing'])
+
+    @mock.patch.object(vv, 'verify', return_value=vv.Result())
+    def test_invalid_file_selections_fail_and_valid_files_continue(self, verify):
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            selected = root / 'valid.mp4'
+            selected.touch()
+            unsupported = root / 'notes.txt'
+            unsupported.touch()
+            missing = root / 'missing.mp4'
+            output = io.StringIO()
+            with mock.patch.object(pathlib.Path, 'write_text') as report, contextlib.redirect_stdout(output):
+                code = vv.main(['--file', str(missing), str(unsupported), str(root), str(selected)])
+            self.assertEqual(code, 1)
+            verify.assert_called_once()
+            self.assertEqual(verify.call_args.args[0], selected.resolve())
+            self.assertIn('Unsupported video extension', output.getvalue())
+            self.assertIn('use --folder for directories', output.getvalue())
+            self.assertEqual(report.call_args.args[0].splitlines(), ['missing.mp4', 'notes.txt', root.name])
+
+    @mock.patch.object(vv, 'verify')
+    def test_staxrip_rejects_an_explicit_file_without_new_suffix(self, verify):
+        with tempfile.TemporaryDirectory() as folder:
+            selected = pathlib.Path(folder) / 'clip.mp4'
+            selected.touch()
+            output = io.StringIO()
+            with mock.patch.object(pathlib.Path, 'write_text'), contextlib.redirect_stdout(output):
+                code = vv.main(['--file', str(selected), '-s'])
+            self.assertEqual(code, 1)
+            verify.assert_not_called()
+            self.assertIn("--staxrip requires a filename ending in '_new'", output.getvalue())
+
+    @mock.patch.object(vv, 'verify')
+    def test_missing_file_does_not_trigger_a_default_folder_scan(self, verify):
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            (root / 'unselected.mp4').touch()
+            with mock.patch.object(vv, 'current_directory', root), mock.patch.object(pathlib.Path, 'write_text'), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                code = vv.main(['--file', str(root / 'missing.mp4')])
+            self.assertEqual(code, 1)
+            verify.assert_not_called()
+
+    @mock.patch.object(vv, 'verify', return_value=vv.Result())
+    def test_no_selection_still_defaults_to_script_folder(self, verify):
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            selected = root / 'default.mp4'
+            selected.touch()
+            with mock.patch.object(vv, 'current_directory', root), contextlib.redirect_stdout(io.StringIO()):
+                code = vv.main([])
+            self.assertEqual(code, 0)
+            verify.assert_called_once()
+            self.assertEqual(verify.call_args.args[0], selected)
+
+    def test_interactive_progress_is_throttled_and_finishes_on_a_new_line(self):
+        output = io.StringIO()
+        output.isatty = lambda: True
+        with mock.patch.object(vv.time, 'monotonic', side_effect=[0, 0.1, 1, 2]):
+            with vv.Progress(vv.Reporter(output), 'FFprobe: video stream 0', 10) as progress:
+                progress.update(1, 60)
+                progress.update(5, 300)
+        text = output.getvalue()
+        self.assertIn('50.0%', text)
+        self.assertNotIn('10.0%', text)
+        self.assertIn('300 frames', text)
+        self.assertTrue(text.endswith('\n'))
+
+    def test_redirected_progress_is_sparse_and_does_not_use_carriage_returns(self):
+        output = io.StringIO()
+        with mock.patch.object(vv.time, 'monotonic', side_effect=[0, 1, 31, 32]):
+            with vv.Progress(vv.Reporter(output), 'FFmpeg: decode', 10) as progress:
+                progress.update(1)
+                progress.update(5)
+        text = output.getvalue()
+        self.assertNotIn('\r', text)
+        self.assertNotIn('10.0%', text)
+        self.assertIn('50.0%', text)
+        self.assertEqual(len(text.splitlines()), 3)
+
+    def test_missing_duration_shows_processed_time_without_a_percentage(self):
+        output = io.StringIO()
+        with mock.patch.object(vv.time, 'monotonic', side_effect=[0, 31, 32]):
+            with vv.Progress(vv.Reporter(output), 'FFprobe: video stream 0') as progress:
+                progress.update(5, 300)
+        text = output.getvalue()
+        self.assertIn('0:05.00 processed', text)
+        self.assertNotIn('%', text)
+
+    @mock.patch.object(vv, 'run_streaming')
+    def test_ffmpeg_progress_uses_microseconds_and_keeps_decode_errors(self, run):
+        progress = mock.Mock()
+        def stream(command, consume):
+            for line in ('frame=60', 'out_time_us=1000000', 'progress=continue',
+                         'out_time_us=N/A', 'progress=end'):
+                consume(line)
+            return 1, ['decode error']
+        run.side_effect = stream
+        errors = vv.ffmpeg_check(pathlib.Path('clip.mp4'), [video()], 'ffmpeg', progress)
+        self.assertEqual(progress.update.call_args_list, [mock.call(1.0, 60), mock.call(None, 60)])
+        self.assertIn('decode error', errors)
+        self.assertTrue(any('exited with code 1' in e for e in errors))
+
+    @mock.patch.object(vv, 'scan_stream', return_value=[])
+    @mock.patch.object(vv, 'probe_metadata')
+    def test_original_audio_is_scanned_for_inherited_duration_checks(self, metadata, scan):
+        metadata.return_value = ([video(), audio(3)], 3, [])
+        vv.inspect_video(pathlib.Path('source.mp4'), 'ffprobe', vv.Result(), source=True)
+        self.assertEqual([call.args[1].kind for call in scan.call_args_list], ['video', 'audio'])
 
 
 @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'FFmpeg/FFprobe required')
@@ -308,6 +564,23 @@ class MediaTests(unittest.TestCase):
         self.assertIn('2 video(s), 1 failure(s)', process.stdout)
         self.assertEqual((folder / 'corrupted_files.txt').read_text().strip(), '00broken.mkv')
 
+    def test_cli_specific_file_compares_original_without_checking_neighbors(self):
+        folder = self.folder / 'single_file'
+        folder.mkdir()
+        original = folder / 'selected.mkv'
+        selected = folder / 'selected_new.mkv'
+        shutil.copyfile(self.clean, original)
+        shutil.copyfile(self.clean, selected)
+        (folder / 'unselected_new.mkv').write_bytes(b'not a video')
+        process = subprocess.run([sys.executable, '-B', vv.__file__, '--file', str(selected),
+                                  '-s', '--strict-timing'], cwd=folder,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertIn('Original: selected.mkv', process.stdout)
+        self.assertIn('1 video(s), 0 failure(s)', process.stdout)
+        self.assertNotIn('unselected_new.mkv', process.stdout)
+        self.assertFalse((folder / 'corrupted_files.txt').exists())
+
     def test_vfr_remux_and_timestamp_rounding_pass(self):
         original = self.folder / 'vfr.mp4'
         output = self.folder / 'vfr_new.mkv'
@@ -319,6 +592,40 @@ class MediaTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             result = vv.verify(output, self.ffprobe, self.ffmpeg, staxrip=True)
         self.assertEqual(result.errors, [], result.errors)
+
+    def test_quantized_encode_warns_and_precise_encode_passes_strict(self):
+        original = self.folder / 'jitter.mp4'
+        output = self.folder / 'jitter_new.mp4'
+        self.encode(original, ['-f', 'lavfi', '-i', 'testsrc2=size=160x120:rate=60:duration=1'],
+                    ['-vf', r'settb=1/90000,setpts=PTS+if(eq(mod(N\,4)\,1)\,90\,if(eq(mod(N\,4)\,2)\,-90\,0))',
+                     '-fps_mode', 'passthrough', '-enc_time_base:v', '1:90000',
+                     '-c:v', 'libx264', '-preset', 'fast'])
+        self.encode(output, ['-copyts', '-i', str(original)],
+                    ['-c:v', 'libx264', '-preset', 'fast', '-fps_mode', 'passthrough'])
+        log = io.StringIO()
+        result = vv.verify(output, self.ffprobe, self.ffmpeg, staxrip=True, reporter=vv.Reporter(log))
+        self.assertEqual(result.errors, [], result.errors)
+        self.assertTrue(any('Frame timing rounded' in w for w in result.warnings), result.warnings)
+        for stage in ('FFprobe: output metadata', 'FFprobe: output video', 'FFmpeg: decode all',
+                      'FFprobe: original metadata', 'Compare original:', 'Check audio/video'):
+            self.assertIn(stage, log.getvalue())
+        strict = vv.verify(output, self.ffprobe, self.ffmpeg, staxrip=True, strict_timing=True)
+        self.assertTrue(any('Frame timing changed' in e for e in strict.errors), strict.errors)
+        self.encode(output, ['-copyts', '-i', str(original)],
+                    ['-c:v', 'libx264', '-preset', 'fast', '-fps_mode', 'passthrough',
+                     '-enc_time_base:v', '-1'])
+        precise = vv.verify(output, self.ffprobe, self.ffmpeg, staxrip=True, strict_timing=True)
+        self.assertEqual(precise.errors, [], precise.errors)
+
+    def test_inherited_audio_tail_warning_is_labelled(self):
+        original = self.folder / 'audio_tail.mkv'
+        output = self.folder / 'audio_tail_new.mkv'
+        self.encode(original, ['-i', str(self.clean)],
+                    ['-c:v', 'copy', '-af', 'atrim=duration=1', '-c:a', 'aac'])
+        self.encode(output, ['-i', str(original)], ['-map', '0', '-c', 'copy'])
+        result = vv.verify(output, self.ffprobe, self.ffmpeg, staxrip=True)
+        self.assertEqual(result.errors, [], result.errors)
+        self.assertTrue(any('Already present in original' in w for w in result.warnings), result.warnings)
 
     def test_audio_first_and_multiple_audio_tracks(self):
         path = self.folder / 'reordered.mkv'
