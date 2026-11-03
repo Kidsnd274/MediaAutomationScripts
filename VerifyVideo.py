@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from verification_runtime import Cancelled, ToolOwner, check_cancel, owned_process
 
 
 video_file_extensions = ['.mkv', '.mp4', '.avi', '.webm']
@@ -34,6 +35,8 @@ TOOL_WIDTH, LABEL_WIDTH, DETAIL_WIDTH = 9, 25, 28
 
 
 def clock_time(seconds):
+    if seconds is None:
+        return 'unknown'
     seconds = max(0, seconds)
     hours, remainder = divmod(seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -133,7 +136,8 @@ class Reporter:
 
 class Progress:
     """A live status line per stage in a terminal; occasional plain updates in redirected logs."""
-    def __init__(self, reporter, tool, label, total=None, severity='error'):
+    def __init__(self, reporter, tool, label, total=None, severity='error', role='output',
+                 stream_index=None, stream_kind=None):
         self.reporter = reporter
         self.tool = tool
         self.label = label
@@ -146,8 +150,12 @@ class Progress:
         self.frame = 0
         self.detail = []
         self.state = None  # None (done), 'warn' or 'error'.
+        self.role, self.stream_index, self.stream_kind = role, stream_index, stream_kind
 
     def __enter__(self):
+        if isinstance(self.reporter, EventReporter):
+            self.reporter.start_stage(self)
+            return self
         if self.reporter:
             self.write(self.running_line() if self.interactive else
                        f'    {self.tool.ljust(TOOL_WIDTH)}{self.label} ...')
@@ -180,12 +188,16 @@ class Progress:
         return line + reporter.paint(reporter.join(details), GRAY)
 
     def update(self, position=None, count=None):
+        check_cancel(count or 0)
         if self.reporter is None:
             return
         now = time.monotonic()
-        if now - self.updated < (0.25 if self.interactive else 30):
+        if now - self.updated < (0.25 if self.interactive or isinstance(self.reporter, EventReporter) else 30):
             return
         self.updated = now
+        if isinstance(self.reporter, EventReporter):
+            self.reporter.progress_stage(self, position, count)
+            return
         fraction = None
         details = []
         if position is not None and math.isfinite(position):
@@ -207,9 +219,13 @@ class Progress:
     def __exit__(self, exc_type, exc_value, traceback):
         if self.reporter is None:
             return
-        state = self.severity if exc_type else self.state or 'done'
-        details = self.detail or ([] if state == 'done' else
-                                  ['see errors below' if state == 'error' else 'see warnings below'])
+        interrupted = exc_type in (Cancelled, KeyboardInterrupt)
+        state = 'skip' if interrupted else self.severity if exc_type else self.state or 'done'
+        details = (['interrupted; not checked'] if interrupted else self.detail or
+                   ([] if state == 'done' else ['see errors below' if state == 'error' else 'see warnings below']))
+        if isinstance(self.reporter, EventReporter):
+            self.reporter.finish_stage(self, 'cancelled' if interrupted else state, details)
+            return
         self.write(self.reporter.stage(state, self.tool, self.label, details,
                                        time.monotonic() - self.started), final=True)
 
@@ -222,6 +238,84 @@ class Result:
     @property
     def status(self):
         return 'FAILED' if self.errors else 'OK WITH WARNINGS' if self.warnings else 'OK'
+
+
+class IssueList(list):
+    def __init__(self, sink, state):
+        super().__init__()
+        self.sink, self.state = sink, state
+
+    def append(self, message):
+        super().append(message)
+        self.sink.diagnostic(self.state, message)
+
+    def extend(self, messages):
+        for message in messages:
+            self.append(message)
+
+
+class EventReporter:
+    """Worker-only structured sink. No output stream, terminal or frame arrays."""
+    interactive = False
+
+    def __init__(self, index, connection, progress):
+        self.index, self.connection, self.progress = index, connection, progress
+        self.sequence = 0
+        self.stages, self.diagnostics = [], []
+
+    def emit(self, kind, best_effort=False, **fields):
+        import queue
+        self.sequence += 1
+        event = dict(job_index=self.index, sequence=self.sequence, kind=kind, **fields)
+        if best_effort:
+            try:
+                self.progress.put_nowait(event)
+            except queue.Full:
+                pass
+        else:
+            self.connection.send(('event', event))
+
+    def bind(self, result):
+        result.warnings, result.errors = IssueList(self, 'warn'), IssueList(self, 'error')
+
+    def diagnostic(self, state, message):
+        item = (state, message)
+        if item not in self.diagnostics:
+            self.diagnostics.append(item)
+            self.emit('diagnostic', state=state, message=message)
+
+    def start_stage(self, progress):
+        progress.stage_id = len(self.stages)
+        stage = dict(stage_id=progress.stage_id, stage_order=progress.stage_id,
+                     tool=progress.tool, label=progress.label, role=progress.role,
+                     stream_index=progress.stream_index, stream_kind=progress.stream_kind,
+                     total_seconds=progress.total, state='running', elapsed_seconds=0,
+                     position_seconds=None, frame_count=None, details=[])
+        self.stages.append(stage)
+        self.emit('stage_start', stage=dict(stage))
+
+    def progress_stage(self, progress, position, count):
+        stage = self.stages[progress.stage_id]
+        stage.update(position_seconds=position, frame_count=count,
+                     elapsed_seconds=time.monotonic() - progress.started)
+        self.emit('progress', best_effort=True, stage=dict(stage))
+
+    def finish_stage(self, progress, state, details):
+        stage = self.stages[progress.stage_id]
+        stage.update(state=state, details=list(details), elapsed_seconds=time.monotonic() - progress.started)
+        self.emit('stage_finish', stage=dict(stage))
+
+    def stage(self, state, tool, label, details=(), elapsed=None):
+        stage = dict(stage_id=len(self.stages), stage_order=len(self.stages), tool=tool,
+                     label=label, role='original' if tool == 'Original' else 'output',
+                     stream_index=None, stream_kind=None, total_seconds=None,
+                     state=state, elapsed_seconds=elapsed, position_seconds=None,
+                     frame_count=None, details=list(details))
+        self.stages.append(stage)
+        self.emit('stage_finish', stage=dict(stage))
+
+    def message(self, message=''):
+        pass
 
 
 @dataclass
@@ -244,6 +338,7 @@ class Stream:
 
     def add_frame(self, frame):
         self.count += 1
+        check_cancel(self.count)
         tick = number(frame.get('best_effort_timestamp'))
         if tick is None:
             tick = number(frame.get('pts'))
@@ -268,8 +363,11 @@ class Stream:
 
     def finish(self, warnings):
         if self.kind == 'video':
-            intervals = [b - a for a, b in zip(self.timestamps, islice(self.timestamps, 1, None))
-                         if math.isfinite(a) and math.isfinite(b) and b > a]
+            intervals = []
+            for index, (a, b) in enumerate(zip(self.timestamps, islice(self.timestamps, 1, None))):
+                check_cancel(index)
+                if math.isfinite(a) and math.isfinite(b) and b > a:
+                    intervals.append(b - a)
             self.interval = statistics.median(intervals) if intervals else 0
             if self.count and not self.last_duration:
                 if self.interval and math.isfinite(self.last):
@@ -310,7 +408,8 @@ def executable(name):
                       current_directory / name):
         if candidate.is_file():
             return str(candidate)
-    return name + '.exe' if sys.platform == 'win32' else name
+    fallback = name + '.exe' if sys.platform == 'win32' else name
+    return shutil.which(fallback) or fallback
 
 
 def diagnostic_messages(text):
@@ -319,15 +418,13 @@ def diagnostic_messages(text):
 
 
 def probe_metadata(file, ffprobe):
-    process = subprocess.run([ffprobe, '-v', 'error', '-show_format', '-show_streams',
-                              '-of', 'json', str(file)],
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                             text=True, encoding='utf-8', errors='replace')
-    errors = diagnostic_messages(process.stderr)
-    if process.returncode:
-        errors.append(f'FFprobe metadata check exited with code {process.returncode}.')
+    lines = []
+    code, errors = run_streaming([ffprobe, '-v', 'error', '-show_format', '-show_streams',
+                                 '-of', 'json', str(file)], lines.append)
+    if code:
+        errors.append(f'FFprobe metadata check exited with code {code}.')
     try:
-        data = json.loads(process.stdout)
+        data = json.loads('\n'.join(lines))
     except ValueError as error:
         raise ValueError(f'Invalid FFprobe JSON: {error}. ' + ' '.join(errors)) from error
     if not isinstance(data, dict) or not isinstance(data.get('streams'), list):
@@ -349,7 +446,7 @@ def probe_metadata(file, ffprobe):
 def run_streaming(command, consume):
     # A temporary stderr file avoids pipe deadlocks while stdout is read incrementally.
     with tempfile.TemporaryFile(mode='w+t', encoding='utf-8', errors='replace') as diagnostics:
-        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=diagnostics,
+        with owned_process(command, stdout=subprocess.PIPE, stderr=diagnostics,
                               text=True, encoding='utf-8', errors='replace') as process:
             try:
                 for line in process.stdout:
@@ -375,10 +472,10 @@ def run_streaming(command, consume):
     return process.returncode, errors
 
 
-def scan_stream(file, stream, ffprobe, progress=None):
+def scan_stream(file, stream, ffprobe, progress=None, decode_threads=None):
     # Selecting one A/V stream prevents subtitle decoding from affecting this check.
     command = [ffprobe, '-v', 'error', '-select_streams', str(stream.index),
-               '-threads', '8', '-show_frames', '-show_entries',
+               '-threads', str(8 if decode_threads is None else decode_threads), '-show_frames', '-show_entries',
                'frame=stream_index,best_effort_timestamp,pts,duration,pkt_duration,nb_samples:frame_side_data=',
                '-of', 'compact=p=0:nk=0', str(file)]
 
@@ -404,6 +501,7 @@ def timestamp_checks(streams, result, source=False, strict_timing=False):
         duplicates = backwards = 0
         first_duplicate = first_backwards = None
         for frame, (a, b) in enumerate(zip(stream.timestamps, islice(stream.timestamps, 1, None)), 2):
+            check_cancel(frame)
             if not math.isfinite(a) or not math.isfinite(b):
                 continue
             if b == a:
@@ -428,13 +526,14 @@ def timestamp_checks(streams, result, source=False, strict_timing=False):
                 issues.append(message)
 
 
-def inspect_video(file, ffprobe, result, source=False, strict_timing=False, reporter=None):
+def inspect_video(file, ffprobe, result, source=False, strict_timing=False, reporter=None, decode_threads=None):
     issues = result.warnings if source else result.errors
     prefix = 'Original: ' if source else ''
     severity = 'warn' if source else 'error'
     label = 'original ' if source else ''
     try:
-        with Progress(reporter, 'FFprobe', label + 'metadata', severity=severity) as progress:
+        with Progress(reporter, 'FFprobe', label + 'metadata', severity=severity,
+                      role='original' if source else 'output') as progress:
             streams, duration, errors = probe_metadata(file, ffprobe)
             progress.detail = [plural(len(streams), 'A/V stream')]
             if errors:
@@ -450,8 +549,12 @@ def inspect_video(file, ffprobe, result, source=False, strict_timing=False, repo
         for stream in streams:
             try:
                 with Progress(reporter, 'FFprobe', f'{label}{stream.kind} stream {stream.index}',
-                              stream.expected_duration or duration, severity=severity) as progress:
-                    errors = scan_stream(file, stream, ffprobe, progress) if reporter else scan_stream(file, stream, ffprobe)
+                              stream.expected_duration or duration, severity=severity,
+                              role='original' if source else 'output', stream_index=stream.index,
+                              stream_kind=stream.kind) as progress:
+                    options = {'decode_threads': decode_threads} if decode_threads is not None else {}
+                    errors = (scan_stream(file, stream, ffprobe, progress, **options) if reporter else
+                              scan_stream(file, stream, ffprobe, **options))
                     progress.detail = [f'{stream.count:,} frames']
                     if stream.duration is not None:
                         progress.detail.append(clock_time(stream.duration))
@@ -479,9 +582,14 @@ def inspect_video(file, ffprobe, result, source=False, strict_timing=False, repo
         return [], None
 
 
-def ffmpeg_check(file, streams, ffmpeg, progress=None):
+def ffmpeg_check(file, streams, ffmpeg, progress=None, decode_threads=None):
     command = [ffmpeg, '-nostdin', '-hide_banner', '-v', 'error', '-xerror',
-               '-nostats', '-stats_period', '0.5', '-progress', 'pipe:1', '-i', str(file)]
+               '-nostats', '-stats_period', '0.5', '-progress', 'pipe:1']
+    if decode_threads is not None:
+        # Generic video decoding AVOption, before -i; applies to every input video.
+        # No codec-specific options, audio override or output encoder override.
+        command.extend(['-threads:v', str(decode_threads)])
+    command.extend(['-i', str(file)])
     for stream in streams:
         command.extend(['-map', f'0:{stream.index}'])
     for index, stream in enumerate(s for s in streams if s.kind == 'video'):
@@ -584,7 +692,8 @@ def quantization_grid(source, target, shift, anchor, largest, tolerance):
     grid = float(1 / target.frame_rate) if target.frame_rate else target.interval
     if not grid or largest > min(0.050, grid / 2) + tolerance:
         return None
-    for a, b in zip(source.timestamps, target.timestamps):
+    for index, (a, b) in enumerate(zip(source.timestamps, target.timestamps)):
+        check_cancel(index)
         if not math.isfinite(a) or not math.isfinite(b):
             return None
         on_grid = anchor + round((b - anchor) / grid) * grid
@@ -604,7 +713,8 @@ def compare_original(original, output, result, strict_timing=False):
         result.errors.append(f'Video stream count changed: {len(source_videos)} original, {len(output_videos)} output.')
     shift = anchor = None
     for source, target in zip(source_videos, output_videos):
-        for a, b in zip(source.timestamps, target.timestamps):
+        for index, (a, b) in enumerate(zip(source.timestamps, target.timestamps)):
+            check_cancel(index)
             if math.isfinite(a) and math.isfinite(b):
                 shift = b - a
                 anchor = b
@@ -621,6 +731,7 @@ def compare_original(original, output, result, strict_timing=False):
         first_mismatch = None
         largest = 0
         for frame, (a, b) in enumerate(zip(source.timestamps, target.timestamps), 1):
+            check_cancel(frame)
             if shift is None or not math.isfinite(a) or not math.isfinite(b):
                 continue
             difference = abs(b - a - shift)
@@ -641,9 +752,14 @@ def compare_original(original, output, result, strict_timing=False):
                                  f'> {tolerance:.9f}s tolerance.')
 
 
-def verify(file, ffprobe, ffmpeg, staxrip=False, ignore_ffmpeg=False, strict_timing=False, reporter=None):
+def verify(file, ffprobe, ffmpeg, staxrip=False, ignore_ffmpeg=False, strict_timing=False, reporter=None,
+           decode_threads=None):
     result = Result()
+    if isinstance(reporter, EventReporter):
+        reporter.bind(result)
     options = {'strict_timing': strict_timing, 'reporter': reporter}
+    if decode_threads is not None:
+        options['decode_threads'] = decode_threads
     streams, duration = inspect_video(file, ffprobe, result, **options)
     if not streams:
         return result
@@ -657,7 +773,8 @@ def verify(file, ffprobe, ffmpeg, staxrip=False, ignore_ffmpeg=False, strict_tim
             ends = [s.end for s in streams if math.isfinite(s.end)]
             decode_duration = max(ends) - min(starts) if starts and ends else duration
             with Progress(reporter, 'FFmpeg', 'decode all A/V streams', decode_duration) as progress:
-                errors = ffmpeg_check(file, streams, ffmpeg, progress)
+                errors = (ffmpeg_check(file, streams, ffmpeg, progress, decode_threads=decode_threads)
+                          if decode_threads is not None else ffmpeg_check(file, streams, ffmpeg, progress))
                 result.errors.extend(errors)
                 if errors:
                     progress.state = 'error'
@@ -689,6 +806,16 @@ def verify(file, ffprobe, ffmpeg, staxrip=False, ignore_ffmpeg=False, strict_tim
     return result
 
 
+def positive_integer(value):
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError('must be a positive integer')
+    if number <= 0:
+        raise argparse.ArgumentTypeError('must be a positive integer')
+    return number
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Check video decoding, frame counts, and timing')
     parser.add_argument('-f', '--folder', nargs='*', default=[], help='Folders containing the videos')
@@ -699,6 +826,10 @@ def main(argv=None):
     parser.add_argument('-if', '--ignore-ffmpeg', action='store_true', help='Skip the independent FFmpeg decode check')
     parser.add_argument('--strict-timing', action='store_true',
                         help='Fail on frame timing changes beyond time-base rounding, including duplicate timestamps')
+    parser.add_argument('--jobs', type=positive_integer, default=1, metavar='N',
+                        help='Maximum concurrent file jobs (default: 1; checks within a file remain sequential)')
+    parser.add_argument('--decode-threads', type=positive_integer, default=None, metavar='N',
+                        help='Input video decoder threads (omitted: FFprobe scans 8; FFmpeg tool default)')
     args = parser.parse_args(argv)
     selected_files = [pathlib.Path(p).resolve() for group in args.file for p in group]
     directories = [pathlib.Path(p).resolve() for p in args.folder]
@@ -768,25 +899,45 @@ def main(argv=None):
 
     warnings = passed = 0
     checked = []
+    checked_indices = []
+    interrupted = False
+    operational_error = None
+    effective_jobs = min(args.jobs, len(files))
+    ffprobe, ffmpeg = executable('ffprobe'), executable('ffmpeg')
     started = time.monotonic()
-    for index, file in enumerate(files, 1):
-        say()
-        say(f'{paint(f"[{index}/{len(files)}]", CYAN, BOLD)} {paint(display(file), BOLD)}')
-        file_started = time.monotonic()
-        result = verify(file, executable('ffprobe'), executable('ffmpeg'), args.staxrip, args.ignore_ffmpeg,
-                        strict_timing=args.strict_timing, reporter=reporter)
-        elapsed = time.monotonic() - file_started
-        messages = [('warn', message) for message in result.warnings] + [('error', message) for message in result.errors]
-        if messages:
-            say(f'  {paint(symbols["stem"], GRAY)}')
-            for position, (state, message) in enumerate(messages, 1):
-                branch = symbols['last' if position == len(messages) else 'branch']
-                say(f'  {paint(branch, GRAY)} {paint(symbols[state], STATE_COLOURS[state], BOLD)} {message}')
-        verdict, _, colour = VERDICTS[result.status]
-        counts = reporter.join([plural(len(result.errors), 'error'), plural(len(result.warnings), 'warning'),
-                                clock_time(elapsed)])
-        say(f'  {paint(symbols["bullet"], colour)} {paint(verdict, colour, BOLD)}  {paint(counts, GRAY)}')
-        checked.append((file, result, elapsed))
+    if effective_jobs > 1:
+        from verification_ui import run_concurrent
+        say(f'  Jobs       {args.jobs} requested; {effective_jobs} effective')
+        say('  Decoders   ' + (f'{args.decode_threads} requested threads per video decoder' if args.decode_threads else
+                               'FFprobe: 8; FFmpeg: tool default'))
+        config = dict(ffprobe=ffprobe, ffmpeg=ffmpeg, staxrip=args.staxrip,
+                      ignore_ffmpeg=args.ignore_ffmpeg, strict_timing=args.strict_timing,
+                      decode_threads=args.decode_threads)
+        records, interrupted, operational_error, batch_elapsed = run_concurrent(
+            files, [display(file) for file in files], effective_jobs, config, reporter)
+        checked_indices = [index + 1 for index, _, _, _ in records]
+        checked = [(file, result, elapsed) for _, file, result, elapsed in records]
+    else:
+        # Keep the classic direct path, with no pool, input capture or app screen.
+        from verification_ui import verdict_lines
+        try:
+            with ToolOwner():
+                for index, file in enumerate(files, 1):
+                    say()
+                    say(f'{paint(f"[{index}/{len(files)}]", CYAN, BOLD)} {paint(display(file), BOLD)}')
+                    file_started = time.monotonic()
+                    options = {'decode_threads': args.decode_threads} if args.decode_threads is not None else {}
+                    result = verify(file, ffprobe, ffmpeg, args.staxrip, args.ignore_ffmpeg,
+                                    strict_timing=args.strict_timing, reporter=reporter, **options)
+                    elapsed = time.monotonic() - file_started
+                    for line in verdict_lines(reporter, result, elapsed):
+                        say(line)
+                    checked.append((file, result, elapsed))
+                    checked_indices.append(index)
+        except (KeyboardInterrupt, Cancelled):
+            interrupted = True
+        batch_elapsed = time.monotonic() - started
+    for file, result, elapsed in checked:
         if result.errors:
             failed.append(file)
         else:
@@ -798,7 +949,7 @@ def main(argv=None):
     if checked:
         width = max(2, number_width)
         say(paint(f'  {"#":>{width}}  {"Result":<6}  {"Err":>3}  {"Warn":>4}  {"Time":>8}  File', GRAY))
-        for index, (file, result, elapsed) in enumerate(checked, 1):
+        for index, (file, result, elapsed) in zip(checked_indices, checked):
             _, word, colour = VERDICTS[result.status]
             errors = paint(f'{len(result.errors):>3}', RED, BOLD) if result.errors else f'{0:>3}'
             warned = paint(f'{len(result.warnings):>4}', YELLOW) if result.warnings else f'{0:>4}'
@@ -809,7 +960,11 @@ def main(argv=None):
               (f'{symbols["warn"]} {warnings} with warnings', warnings, YELLOW),
               (f'{symbols["error"]} {len(failed)} failed', len(failed), RED)]
     say('  ' + '   '.join(paint(text, colour, BOLD) if count else paint(text, GRAY) for text, count, colour in totals) +
-        '   ' + paint(f'{plural(len(files), "video")} in {clock_time(time.monotonic() - started)}', GRAY))
+        '   ' + paint(f'{plural(len(checked), "video")} in {clock_time(batch_elapsed)}', GRAY))
+    if interrupted or operational_error:
+        say(f'  INCOMPLETE: {len(checked)}/{len(files)} checked; remaining files were not checked.')
+    if operational_error:
+        say(f'  Worker pool failure: {operational_error}')
     if failed:
         say()
         say(f'  {paint("Failed", RED, BOLD)}')
@@ -821,7 +976,7 @@ def main(argv=None):
             say(f'  {paint("Report", GRAY)}  {report.resolve()}')
         except OSError as error:
             say(f'  {paint(symbols["warn"], YELLOW, BOLD)} Could not write corrupted_files.txt: {error}')
-    return 1 if failed else 0
+    return 130 if interrupted else 1 if failed or operational_error else 0
 
 
 def print_banner(reporter):

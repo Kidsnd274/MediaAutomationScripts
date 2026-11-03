@@ -1,1 +1,7 @@
 ﻿corrupted_files.txt
+__pycache__/
+/benchmark-results/
+/plans/benchmark-data/
+/plans/benchmark_concurrency.py
+/plans/benchmark_metrics.py
+/plans/report_concurrency_benchmark.py

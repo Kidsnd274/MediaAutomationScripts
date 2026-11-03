@@ -7,7 +7,7 @@ Checks video/audio decoding and timing. With `--staxrip`, also compares the outp
 
 ### Usage
 
-Requires Python 3.7+ and FFmpeg/FFprobe 5.1+ (no extra Python packages). Put the tools in PATH, beside the script, or in its `ffmpeg` subfolder. Both checks remain sequential.
+Requires Python 3.7+ and FFmpeg/FFprobe 5.1+ (no extra Python packages). Keep `VerifyVideo.py`, `verification_runtime.py`, and `verification_ui.py` together. Put the tools in PATH, beside the script, or in its `ffmpeg` subfolder. Checks within each file remain sequential.
 
 ```text
 python VerifyVideo.py -f "Video Folder"
@@ -17,6 +17,8 @@ python VerifyVideo.py -f "Video Folder" -s --strict-timing
 python VerifyVideo.py --file "Video Folder\Recording_new.mp4" -s
 python VerifyVideo.py --file "Video Folder\Recording_new.mp4" -s --strict-timing
 python VerifyVideo.py --file "first.mp4" "second.mkv"
+python VerifyVideo.py -f "Video Folder" --jobs 2
+python VerifyVideo.py -f "Video Folder" --jobs 4 --decode-threads 2
 
 options:
   -h, --help            Show help
@@ -29,6 +31,8 @@ options:
   -if, --ignore-ffmpeg  Skip the independent FFmpeg decoding check
   --strict-timing      Require exact timing preservation within time-base rounding;
                        also fail on duplicate video presentation timestamps
+  --jobs N             Maximum concurrent file jobs (positive integer; default 1)
+  --decode-threads N   Request input video decoder threads (positive integer; optional)
 ```
 
 Supported extensions are `.mkv`, `.mp4`, `.avi`, and `.webm`, case-insensitively. Edit `video_file_extensions` in the script to change them.
@@ -48,6 +52,20 @@ The summary shows a results table (result, error and warning counts, time, and f
 Colour is used only in an interactive terminal, using standard ANSI codes (enabled on Windows consoles through `ctypes`, with no extra packages); set `NO_COLOR` to turn it off. Redirected output has no colour or cursor control: stage starts/completions and, for long checks, an update at most once every 30 seconds. If the output encoding cannot represent the Unicode symbols (for example a `cp1252` log file on Windows), plain ASCII equivalents are used instead.
 
 To compare candidate output styles with mock data (no FFmpeg needed), run `python previews/style_preview.py`.
+
+### Concurrent batches
+
+`--jobs` defaults to **1**. The default, explicit `--jobs 1`, and any selection with only one valid input use the classic terminal layout above. A larger limit starts a bounded pool of Python processes, capped at the number of selected files. A freed slot starts the next file immediately. Metadata, individual stream scans, FFmpeg, and original comparisons remain sequential inside each job. File numbering, the final full transcript, summary, and failure report retain the sorted scan-list order.
+
+With `--decode-threads` omitted, **FFprobe frame scans request 8 threads and FFmpeg receives no thread override**, regardless of job count. Metadata probing is unchanged. An explicit value replaces the FFprobe scan setting (including originals) and adds FFmpeg's generic `-threads:v N` input option before `-i`, applying to input video decoders that support threading. It does not change audio or output encoder thread options. This request is not a total CPU/thread limit; decoder implementations and tool internals determine actual usage. There is no resource detection, calculated thread budget, automatic worker selection, startup benchmark, or adaptive tuning.
+
+Concurrent interactive runs use an ordered scrollable transcript above a pinned live panel, following the V5 preview. Both sections show real stage progress and spinners; completed details and diagnostics appear immediately. Use the mouse wheel, drag/click the right-hand scrollbar, or use arrows/Page Up/Page Down. Home browses from the start; End follows completions. Q or Ctrl+C cancels the batch. Only changed rows are rewritten. On exit the terminal modes and cursor are restored, and the full ordered transcript is printed to ordinary scrollback. Redirected output or terminals without the required capabilities use plain completion logs followed by the ordered transcript, with the same concurrency.
+
+Cancellation stops dispatch and cleans up owned workers/tools, including blocked metadata reads. Interrupted batches return **130**, identify checked versus unfinished files, and never classify cancelled/unstarted inputs as corrupt. Windows uses parent-owned kill-on-close Job Objects and suspended tool startup before ownership registration. If the host prevents safe Job Object assignment, execution fails before starting an unowned tool. POSIX uses process groups and a worker cancellation/liveness watcher. Abrupt OS termination and terminals/platforms beyond the tested Windows configuration need additional validation.
+
+Batch elapsed time includes worker startup and cleanup, and ends before printing the final concurrent transcript and summary. Per-file times measure processing inside each worker and exclude queue wait. Concurrent work raises memory use and competing reads; start by manually comparing one and two jobs on your storage. Measured local results and limitations are in [plans/concurrency-benchmark-results.md](plans/concurrency-benchmark-results.md); these do not change the fixed defaults.
+
+To find suitable settings on another computer, follow [Benchmarking VerifyVideo](docs/benchmarking.md). It includes instructions for future agents and a reusable runner that accepts explicit media paths; raw results stay local.
 
 ### What is checked
 

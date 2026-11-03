@@ -161,22 +161,28 @@ class LogicTests(unittest.TestCase):
         self.assertIn('0:3', command)
         self.assertIn('pipe:1', command)
 
-    @mock.patch.object(vv.subprocess, 'run')
+    @mock.patch.object(vv, 'run_streaming')
     def test_metadata_selects_types_and_excludes_cover_art(self, run):
         data = {'streams': [
             {'index': 0, 'codec_type': 'audio', 'time_base': '1/48000', 'sample_rate': '48000'},
             {'index': 1, 'codec_type': 'subtitle'},
             {'index': 2, 'codec_type': 'video', 'time_base': '1/1000'},
             {'index': 3, 'codec_type': 'video', 'disposition': {'attached_pic': 1}}]}
-        run.return_value = subprocess.CompletedProcess([], 0, stdout=json.dumps(data), stderr='')
+        def metadata(command, consume):
+            consume(json.dumps(data))
+            return 0, []
+        run.side_effect = metadata
         streams, duration, errors = vv.probe_metadata(pathlib.Path('clip.mkv'), 'ffprobe')
         self.assertEqual([(s.index, s.kind) for s in streams], [(0, 'audio'), (2, 'video')])
         self.assertIsNone(duration)
         self.assertEqual(errors, [])
 
-    @mock.patch.object(vv.subprocess, 'run')
+    @mock.patch.object(vv, 'run_streaming')
     def test_malformed_probe_output_fails(self, run):
-        run.return_value = subprocess.CompletedProcess([], 0, stdout='{oops', stderr='')
+        def metadata(command, consume):
+            consume('{oops')
+            return 0, []
+        run.side_effect = metadata
         result = vv.Result()
         vv.inspect_video(pathlib.Path('clip.mkv'), 'ffprobe', result)
         self.assertEqual(result.status, 'FAILED')
